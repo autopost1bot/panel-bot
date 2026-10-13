@@ -42,7 +42,6 @@ npm install --no-audit --no-fund
 
 echo ">> [3/6] Creating database..."
 systemctl enable --now postgresql
-cd /tmp
 DBPASS="$(openssl rand -hex 16)"
 JWT_SECRET="$(openssl rand -hex 32)"
 sudo -u postgres psql -v ON_ERROR_STOP=1 <<SQL
@@ -57,7 +56,7 @@ GRANT service_role TO authenticator;
 GRANT anon TO authenticator;
 SELECT 'CREATE DATABASE panelbot' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='panelbot')\gexec
 SQL
-sudo -u postgres psql -v ON_ERROR_STOP=1 -d panelbot < /root/panel-bot/schema.sql
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d panelbot -f /root/panel-bot/schema.sql
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d panelbot <<SQL
 GRANT USAGE ON SCHEMA public TO service_role;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
@@ -67,7 +66,6 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
 SQL
 
-cd /root/panel-bot
 echo ">> [4/6] Installing database API..."
 if [ ! -x /usr/local/bin/postgrest ]; then
   curl -fsSL -o /tmp/postgrest.tar.xz https://github.com/PostgREST/postgrest/releases/download/v12.2.3/postgrest-v12.2.3-linux-static-x64.tar.xz
@@ -106,7 +104,7 @@ process.stdout.write(h+"."+p+"."+s);')"
 echo ">> [5/6] Setting up https..."
 cat > /etc/caddy/Caddyfile <<CADDY
 $DOMAIN {
-  reverse_proxy localhost:3000
+  reverse_proxy localhost:3005
 }
 :8081 {
   bind 127.0.0.1
@@ -122,7 +120,7 @@ cat > /root/panel-bot/.env <<ENV
 ADMIN_BOT_TOKEN=$BOT_TOKEN
 ADMIN_TG_IDS=$ADMIN_ID
 PUBLIC_URL=https://$DOMAIN
-PORT=3000
+PORT=3005
 SUPABASE_URL=http://127.0.0.1:8081
 SUPABASE_SERVICE_ROLE_KEY=$SERVICE_KEY
 ENV
