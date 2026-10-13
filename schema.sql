@@ -1,0 +1,82 @@
+-- Run this once in your database SQL editor before starting the bot.
+CREATE TABLE IF NOT EXISTS bot_sessions (tenant_id integer NOT NULL DEFAULT 0, tg_id bigint NOT NULL, state jsonb NOT NULL DEFAULT '{}'::jsonb, updated_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (tenant_id, tg_id));
+CREATE TABLE IF NOT EXISTS bot_settings (tenant_id integer NOT NULL DEFAULT 0, key text NOT NULL, value text, PRIMARY KEY (tenant_id, key));
+CREATE TABLE IF NOT EXISTS bot_accounts (id serial PRIMARY KEY, tenant_id integer NOT NULL DEFAULT 0, username text NOT NULL, password_hash text NOT NULL, tg_id bigint, balance double precision NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (tenant_id, username));
+CREATE TABLE IF NOT EXISTS tenant_bots (id serial PRIMARY KEY, owner_account_id integer NOT NULL UNIQUE REFERENCES bot_accounts(id) ON DELETE CASCADE, owner_tg_id bigint NOT NULL, token text UNIQUE, bot_username text, expires_at timestamptz NOT NULL DEFAULT now(), status text NOT NULL DEFAULT 'active', reminded integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS tenant_bot_payments (id serial PRIMARY KEY, tenant_id integer NOT NULL, amount double precision NOT NULL, days integer NOT NULL, note text, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS categories (id serial PRIMARY KEY, tenant_id integer NOT NULL DEFAULT 0, name text NOT NULL, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS products (id serial PRIMARY KEY, tenant_id integer NOT NULL DEFAULT 0, category_id integer REFERENCES categories(id) ON DELETE SET NULL, parent_id integer REFERENCES products(id) ON DELETE CASCADE, name text NOT NULL, description text, price double precision NOT NULL DEFAULT 0, cost double precision NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS product_keys (id serial PRIMARY KEY, product_id integer NOT NULL REFERENCES products(id) ON DELETE CASCADE, key text NOT NULL, sold boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS shop_orders (id serial PRIMARY KEY, tenant_id integer NOT NULL DEFAULT 0, account_id integer NOT NULL, product_id integer, product_name text, key text, price double precision NOT NULL, cost double precision NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS account_prices (tenant_id integer NOT NULL DEFAULT 0, account_id integer NOT NULL REFERENCES bot_accounts(id) ON DELETE CASCADE, product_id integer NOT NULL REFERENCES products(id) ON DELETE CASCADE, price double precision NOT NULL, PRIMARY KEY (account_id, product_id));
+
+-- Lock tables from public access; the bot uses the service key.
+ALTER TABLE bot_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bot_settings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE bot_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_bots ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tenant_bot_payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE categories ENABLE ROW LEVEL SECURITY;
+ALTER TABLE products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE product_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE shop_orders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE account_prices ENABLE ROW LEVEL SECURITY;
+
+CREATE OR REPLACE FUNCTION public.buy_keys(p_tenant integer, p_account integer, p_product integer, p_qty integer)
+ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public'
+AS $function$
+DECLARE
+  p record; cu record; k record;
+  unit double precision; total double precision;
+  keys text[] := '{}'; orders int[] := '{}'; oid int; label text; nkeys int := 0;
+BEGIN
+  SELECT * INTO p FROM products WHERE id = p_product AND tenant_id = p_tenant;
+  IF NOT FOUND THEN RETURN jsonb_build_object('err', 'Product not found.'); END IF;
+  SELECT ap.price INTO unit FROM account_prices ap WHERE ap.account_id = p_account AND ap.product_id = p_product AND ap.tenant_id = p_tenant;
+  unit := COALESCE(unit, p.price);
+  total := unit * p_qty;
+  SELECT * INTO cu FROM bot_accounts WHERE id = p_account AND tenant_id = p_tenant FOR UPDATE;
+  IF NOT FOUND THEN RETURN jsonb_build_object('err', 'Account not found.'); END IF;
+  IF cu.balance < total THEN
+    RETURN jsonb_build_object('err', 'Not enough balance. Please ask the seller to add balance.');
+  END IF;
+  FOR k IN SELECT id, key FROM product_keys WHERE product_id = p_product AND NOT sold ORDER BY id LIMIT p_qty FOR UPDATE SKIP LOCKED LOOP
+    nkeys := nkeys + 1;
+    keys := keys || k.key;
+    UPDATE product_keys SET sold = true WHERE id = k.id;
+    INSERT INTO shop_orders (tenant_id, account_id, product_id, product_name, key, price, cost)
+      VALUES (p_tenant, p_account, p_product, p.name, k.key, unit, p.cost) RETURNING id INTO oid;
+    orders := orders || oid;
+  END LOOP;
+  IF nkeys < p_qty THEN RAISE EXCEPTION 'STOCK:%', nkeys; END IF;
+  UPDATE bot_accounts SET balance = balance - total WHERE id = p_account;
+  IF p.parent_id IS NOT NULL THEN
+    SELECT (SELECT name FROM products WHERE id = p.parent_id) || ' — ' || p.name INTO label;
+  ELSE label := p.name; END IF;
+  label := regexp_replace(label, '<[^>]+>', '', 'g');
+  RETURN jsonb_build_object('ok', true, 'keys', keys, 'orders', orders, 'total', total, 'balance', cu.balance - total, 'label', label);
+END;
+$function$;
+
+CREATE OR REPLACE FUNCTION public.buy_subscription(p_account integer, p_tg bigint, p_price double precision, p_days integer)
+ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public'
+AS $function$
+DECLARE cu record; t record;
+BEGIN
+  SELECT * INTO cu FROM bot_accounts WHERE id = p_account AND tenant_id = 0 FOR UPDATE;
+  IF NOT FOUND THEN RETURN jsonb_build_object('err', 'Account not found.', 'balance', 0); END IF;
+  IF cu.balance < p_price THEN RETURN jsonb_build_object('err', 'insufficient', 'balance', cu.balance); END IF;
+  UPDATE bot_accounts SET balance = balance - p_price WHERE id = p_account;
+  INSERT INTO tenant_bots (owner_account_id, owner_tg_id, expires_at, status)
+    VALUES (p_account, p_tg, now() + make_interval(days => p_days), 'active')
+  ON CONFLICT (owner_account_id) DO UPDATE SET
+    expires_at = GREATEST(tenant_bots.expires_at, now()) + make_interval(days => p_days),
+    status = 'active', reminded = 0, owner_tg_id = EXCLUDED.owner_tg_id
+  RETURNING * INTO t;
+  INSERT INTO tenant_bot_payments (tenant_id, amount, days, note) VALUES (t.id, p_price, p_days, 'wallet');
+  RETURN jsonb_build_object('ok', true, 'id', t.id, 'expires_at', t.expires_at, 'balance', cu.balance - p_price, 'token', t.token, 'bot_username', t.bot_username);
+END;
+$function$;
+
+REVOKE EXECUTE ON FUNCTION public.buy_keys(integer, integer, integer, integer) FROM PUBLIC, anon, authenticated;
+REVOKE EXECUTE ON FUNCTION public.buy_subscription(integer, bigint, double precision, integer) FROM PUBLIC, anon, authenticated;

@@ -1,0 +1,14 @@
+{
+  "name": "panel-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/server.ts"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.3",
+    "tsx": "^4.19.2"
+  }
+}
