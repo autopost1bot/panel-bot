@@ -256,46 +256,69 @@ async function getAccount(ctx: Ctx) {
   return data;
 }
 
-// Catalog helpers
+// Catalog helpers — batched: one keys query per screen instead of one per row.
+async function stockMap(db: any, ids: number[]): Promise<Map<number, number>> {
+  const map = new Map<number, number>();
+  if (!ids.length) return map;
+  const { data } = await db.from("product_keys").select("product_id").in("product_id", ids).eq("sold", false);
+  for (const k of data ?? []) map.set(Number(k.product_id), (map.get(Number(k.product_id)) ?? 0) + 1);
+  return map;
+}
 async function stockOf(db: any, tenantId: number, pid: number): Promise<number> {
   const { data: vars } = await db.from("products").select("id").eq("tenant_id", tenantId).eq("parent_id", pid);
   const ids = [pid, ...(vars ?? []).map((v: any) => v.id)];
-  const { count } = await db.from("product_keys").select("id", { count: "exact", head: true }).in("product_id", ids).eq("sold", false);
-  return count ?? 0;
+  const map = await stockMap(db, ids);
+  return ids.reduce((n, id) => n + (map.get(id) ?? 0), 0);
 }
 async function getProduct(db: any, tenantId: number, pid: number) {
   const { data: p } = await db.from("products").select("*").eq("id", pid).eq("tenant_id", tenantId).maybeSingle();
   if (!p) return null;
-  const { count: nvars } = await db.from("products").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).eq("parent_id", pid);
-  return { ...p, stock: await stockOf(db, tenantId, pid), nvars: nvars ?? 0 };
+  const { data: vars } = await db.from("products").select("id").eq("tenant_id", tenantId).eq("parent_id", pid);
+  const ids = [pid, ...(vars ?? []).map((v: any) => v.id)];
+  const map = await stockMap(db, ids);
+  return { ...p, stock: ids.reduce((n, id) => n + (map.get(id) ?? 0), 0), nvars: (vars ?? []).length };
 }
 async function variantsOf(db: any, tenantId: number, pid: number) {
   const { data: vs } = await db.from("products").select("*").eq("tenant_id", tenantId).eq("parent_id", pid).order("price").order("id");
-  const out = [];
-  for (const v of vs ?? []) out.push({ ...v, stock: await stockOf(db, tenantId, v.id) });
-  return out;
+  const map = await stockMap(db, (vs ?? []).map((v: any) => v.id));
+  return (vs ?? []).map((v: any) => ({ ...v, stock: map.get(Number(v.id)) ?? 0 }));
 }
 async function topProducts(db: any, tenantId: number, cat: number | null | "all") {
   let q = db.from("products").select("*").eq("tenant_id", tenantId).is("parent_id", null).order("id");
   if (cat === null) q = q.is("category_id", null);
   else if (cat !== "all") q = q.eq("category_id", cat);
-  const { data: ps } = await q;
-  const out = [];
-  for (const p of ps ?? []) {
-    const { count: nvars } = await db.from("products").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).eq("parent_id", p.id);
-    const { data: minv } = await db.from("products").select("price").eq("tenant_id", tenantId).eq("parent_id", p.id).order("price").limit(1);
-    out.push({ ...p, stock: await stockOf(db, tenantId, p.id), nvars: nvars ?? 0, from_price: minv?.[0]?.price ?? null });
+  const [psRes, vsRes] = await Promise.all([
+    q,
+    db.from("products").select("id,parent_id,price").eq("tenant_id", tenantId).not("parent_id", "is", null),
+  ]);
+  const ps = psRes.data ?? [];
+  const allVars = vsRes.data ?? [];
+  const varsByParent = new Map<number, any[]>();
+  for (const v of allVars) {
+    const k = Number(v.parent_id);
+    if (!varsByParent.has(k)) varsByParent.set(k, []);
+    varsByParent.get(k)!.push(v);
   }
-  return out;
+  const ids = [...ps.map((p: any) => Number(p.id)), ...allVars.map((v: any) => Number(v.id))];
+  const map = await stockMap(db, ids);
+  return ps.map((p: any) => {
+    const vs = varsByParent.get(Number(p.id)) ?? [];
+    const stock = (map.get(Number(p.id)) ?? 0) + vs.reduce((n, v) => n + (map.get(Number(v.id)) ?? 0), 0);
+    const from_price = vs.length ? Math.min(...vs.map((v) => Number(v.price))) : null;
+    return { ...p, stock, nvars: vs.length, from_price };
+  });
 }
 async function categories(db: any, tenantId: number) {
-  const { data: cs } = await db.from("categories").select("*").eq("tenant_id", tenantId).order("id");
-  const out = [];
-  for (const c of cs ?? []) {
-    const { count: n } = await db.from("products").select("id", { count: "exact", head: true }).eq("tenant_id", tenantId).eq("category_id", c.id).is("parent_id", null);
-    out.push({ ...c, n: n ?? 0 });
+  const [csRes, psRes] = await Promise.all([
+    db.from("categories").select("*").eq("tenant_id", tenantId).order("id"),
+    db.from("products").select("category_id").eq("tenant_id", tenantId).is("parent_id", null),
+  ]);
+  const counts = new Map<number, number>();
+  for (const p of psRes.data ?? []) {
+    const k = Number(p.category_id);
+    counts.set(k, (counts.get(k) ?? 0) + 1);
   }
-  return out;
+  return (csRes.data ?? []).map((c: any) => ({ ...c, n: counts.get(Number(c.id)) ?? 0 }));
 }
 const priceLabel = (p: any) => Number(p.nvars) ? `from ${money(p.from_price ?? 0)}` : money(p.price);
 async function fullName(db: any, tenantId: number, p: any): Promise<string> {
