@@ -27,7 +27,7 @@ if [ "$LOCAL" = "$REMOTE" ]; then
 fi
 
 echo "[$(date -u '+%F %T UTC')] new code $LOCAL -> $REMOTE" >> "$LOG"
-git pull -q origin "$BRANCH" >> "$LOG" 2>&1
+git reset --hard "origin/$BRANCH" >> "$LOG" 2>&1   # discard local edits, take remote exactly
 
 # Install dependencies only when the dependency list changed.
 if ! git diff -q "$LOCAL" "$REMOTE" -- package.json package-lock.json >/dev/null 2>&1; then
