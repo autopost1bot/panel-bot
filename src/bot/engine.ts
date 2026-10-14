@@ -409,7 +409,7 @@ async function emojiList(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "ic
   if (page + 1 < pages) nav.push(btn("Next ➡️", `a:emoji:${kind}:${page + 1}`));
   if (nav.length) rows.push(nav);
   rows.push([btn("⬅️ Go back", "a:emoji")]);
-  await reply(`✨ <b>Choose ${kind === "icons" ? "an icon" : "a " + (kind === "products" ? "product / duration" : "category")}</b> · Page ${page + 1}/${pages}` + (items.length ? "" : "\nNo items yet."), kb(...rows));
+  await reply(`✨ <b>Choose ${kind === "icons" ? "an icon" : "a " + (kind === "products" ? "product / duration" : "category")}</b> · Page ${page + 1}/${pages}` + (items.length ? "" : "\nNo items yet."), { ...kb(...rows), noButtonColors: true });
 }
 
 const pr = (ctx: Ctx, p: any) => ctx.hide ? "$" : money(ctx.prices.get(Number(p.id)) ?? p.price);

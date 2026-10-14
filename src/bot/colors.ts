@@ -80,12 +80,17 @@ export function buttonColorId(button: Record<string, any>): string | undefined {
   return COLOR_BUTTONS.find(item => item.actions?.some(action => action.endsWith(":") ? callback.startsWith(action) : callback === action))?.id;
 }
 export function colorExtra(extra: Record<string, any>, colors?: ButtonColors): Record<string, any> {
-  const markup = extra.reply_markup;
-  if (!markup || !colors) return extra;
+  // Picker lists ("choose an icon / product / category") hold data rows whose
+  // display names deliberately reuse button labels, so they must never inherit
+  // saved button colors. The marker is removed before anything is sent.
+  const { noButtonColors, ...rest } = extra;
+  if (noButtonColors) return rest;
+  const markup = rest.reply_markup;
+  if (!markup || !colors) return rest;
   const key = markup.inline_keyboard ? "inline_keyboard" : markup.keyboard ? "keyboard" : null;
-  if (!key) return extra;
+  if (!key) return rest;
   const fallback = key === "inline_keyboard" ? colors.inline : colors.keyboard;
-  return { ...extra, reply_markup: { ...markup, [key]: markup[key].map((row: any[]) => row.map(button => {
+  return { ...rest, reply_markup: { ...markup, [key]: markup[key].map((row: any[]) => row.map(button => {
     const result = typeof button === "string" ? { text: button } : { ...button };
     const id = buttonColorId(result);
     const color = (id ? colors.items?.[id] : undefined) ?? fallback;
