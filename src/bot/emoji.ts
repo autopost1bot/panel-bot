@@ -2,6 +2,24 @@ import { escapeHtml, extractEmojiId, iconButton, plainLabel } from "./tg";
 import { colorExtra, parseButtonColors, type ButtonColors } from "./colors";
 
 export const EMOJI_ICONS = ["🛍", "🏛", "🚀", "🔧", "📦", "📊", "➕", "📂", "👤", "💰", "📣", "👋", "🙈", "👁", "🤖", "🔑", "🧾", "📜", "⬅️", "✖️", "✅", "📝", "⏱", "💵", "🛒", "🔢", "🏠", "✏️", "🗑", "📋", "🔐", "❌", "⚠️", "⭐", "📅", "🟢", "🔍", "🔓", "➖", "📄", "💲", "🎉", "🛠", "⛔️", "✉️", "👥", "🏷", "🔎", "📈", "📉", "💳", "💸", "🔄", "🔙", "📌", "👉", "➡️"];
+// Display names only: saved settings and callback indexes keep using EMOJI_ICONS.
+export const EMOJI_LABELS: Record<string, string> = {
+  "🛍": "Buy keys", "🏛": "Account", "🚀": "Log out", "🔧": "Manage",
+  "📦": "Stock / Products", "📊": "Statistics", "➕": "Add product / key type",
+  "📂": "Categories", "👤": "Add account", "💰": "Balance", "📣": "Broadcast",
+  "👋": "Welcome text", "🙈": "Hide prices", "👁": "Show prices", "🤖": "My Own Bot / Reseller bots",
+  "🔑": "Keys", "🧾": "Purchase receipt", "📜": "Purchase History", "⬅️": "Go back",
+  "✖️": "Cancel", "✅": "Save / Confirm", "📝": "Position name", "⏱": "Duration",
+  "💵": "Price", "🛒": "Buy one / Buy multiple", "🔢": "Quantity", "🏠": "Main menu",
+  "✏️": "Rename / Edit", "🗑": "Delete", "📋": "Order details", "🔐": "Login / Password",
+  "❌": "Reject / Error", "⚠️": "Warning", "⭐": "Featured", "📅": "Date / Expiry",
+  "🟢": "Active status", "🔍": "Search", "🔓": "Access", "➖": "Deduct balance",
+  "📄": "Details", "💲": "Pricing", "🎉": "Purchase completed", "🛠": "Admin tools",
+  "⛔️": "Subscription expired", "✉️": "Messages", "👥": "Manage accounts",
+  "🏷": "Product label", "🔎": "Look at purchases", "📈": "Profit", "📉": "Expenses",
+  "💳": "Payments", "💸": "Top up / Deduct", "🔄": "Refresh / Renew",
+  "🔙": "Back", "📌": "Notice", "👉": "Continue", "➡️": "Next",
+};
 export type EmojiTheme = { enabled: boolean; icons: Record<string, string>; buttons?: ButtonColors };
 export function parseEmojiTheme(raw: string | null): EmojiTheme {
   try {
@@ -21,7 +39,8 @@ export function emojiTag(text: string, entities: { type: string; offset: number;
   return `<tg-emoji emoji-id="${entity.custom_emoji_id}">${escapeHtml(fallback)}</tg-emoji>`;
 }
 export function replaceNameIcon(name: string, tag: string | null): string {
-  const without = name.replace(/<tg-emoji\s+emoji-id="\d+">[\s\S]*?<\/tg-emoji>/g, "").trim();
+  const without = name.replace(/<tg-emoji\s+emoji-id="\d+">[\s\S]*?<\/tg-emoji>/g, "").trim()
+    .replace(/^(?:(?:\p{Extended_Pictographic}|\p{Regional_Indicator})(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*\s*)+/u, "").trim();
   return tag ? `${tag} ${without}` : without;
 }
 export function themeHtml(html: string, theme: EmojiTheme): string {

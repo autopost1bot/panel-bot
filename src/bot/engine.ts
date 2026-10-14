@@ -10,7 +10,7 @@ import {
   editHtml, sendHtml, tgCall, webhookSecret, type TgEntity,
 } from "./tg";
 
-import { EMOJI_ICONS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, type EmojiTheme } from "./emoji";
+import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, type EmojiTheme } from "./emoji";
 import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "./colors";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
@@ -399,7 +399,7 @@ async function emojiMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
 }
 async function emojiList(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "icons" | "products" | "categories", requested: number) {
   const db = await getDb();
-  const items = kind === "icons" ? EMOJI_ICONS.map((icon, id) => ({ id, name: icon + " " + (plainLabel(Object.values(L).find(label => label.startsWith(icon)) ?? icon) || "Icon") }))
+  const items = kind === "icons" ? EMOJI_ICONS.map((icon, id) => ({ id, name: `${icon} ${EMOJI_LABELS[icon] ?? "Message icon"}` }))
     : ((await db.from(kind).select("id,name").eq("tenant_id", ctx.bot.tenantId).order("id")).data ?? []);
   const pages = Math.max(1, Math.ceil(items.length / 10));
   const page = Math.min(Math.max(0, requested), pages - 1);
@@ -874,7 +874,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (iconMatch) {
     const icon = EMOJI_ICONS[Number(iconMatch[1])];
     if (!icon) return;
-    return ask(ctx, reply, { s: "emoji_icon", icon }, `${icon} Send a Premium emoji for this button/message icon, or - to restore the default:`, kb([btn("⬅️ Go back", "a:emoji:icons")]));
+    return ask(ctx, reply, { s: "emoji_icon", icon }, `${icon} <b>${EMOJI_LABELS[icon] ?? "Message icon"}</b>\n\nSend a Premium emoji, or - to restore the default:`, kb([btn("⬅️ Go back", `a:emoji:icons:${Math.floor(Number(iconMatch[1]) / 10)}`)]));
   }
   const itemMatch = data.match(/^a:emoji:item:(products|categories):(\d+)$/);
   if (itemMatch) {
