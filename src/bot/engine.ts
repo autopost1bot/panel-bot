@@ -43,7 +43,7 @@ type Step =
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
 
-type Session = { accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined };
+type Session = { accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined };
 
 export type BotInfo = {
   token: string;
@@ -58,6 +58,7 @@ type Ctx = {
   chatId: number;
   tgId: number;
   firstName: string;
+  tgUsername: string;
   session: Session;
   isBoss: boolean;
   emoji: EmojiTheme;
@@ -119,7 +120,7 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   };
 
   const isBoss = bot.isMain ? bot.adminTgIds.includes(tgId) : tgId === bot.ownerTgId;
-  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", session, isBoss, emoji: parseEmojiTheme(emojiRaw), hide: false, prices: new Map() };
+  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", tgUsername: String(from.username ?? ""), session, isBoss, emoji: parseEmojiTheme(emojiRaw), hide: false, prices: new Map() };
   (ctx as any).__msgId = msg?.message_id ?? null;
   // Customers see prices hidden (only "$") when the shop owner enabled it,
   // and their own account-specific prices when set.
@@ -240,6 +241,16 @@ async function getSetting(bot: BotInfo, key: string): Promise<string | null> {
 async function setSetting(bot: BotInfo, key: string, value: string) {
   const db = await getDb();
   await db.from("bot_settings").upsert({ tenant_id: bot.tenantId, key, value });
+}
+/** Telegram IDs rejected by the admin — they cannot request access again. */
+async function blockedUsers(bot: BotInfo): Promise<number[]> {
+  try {
+    const raw = await getSetting(bot, "blocked_users");
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.map(Number).filter(Number.isFinite) : [];
+  } catch {
+    return [];
+  }
 }
 async function getPrice(bot: BotInfo): Promise<number> {
   const v = Number((await getSetting(bot, "bot_price")) ?? 20);
@@ -440,8 +451,27 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     } else if (ctx.session.accountId) {
       await reply((await getSetting(bot, "welcome")) ?? "👋 <b>Welcome!</b>", menuKb(ctx));
     } else {
-      ctx.session.step = { s: "login_user" };
-      await reply("👋 <b>Welcome!</b>\n\n🔐 Please log in.\nSend your <b>username</b>:", kb([btn("✖️ Cancel", "x:cancel")]));
+      // New visitor: admin must approve before they can log in.
+      const blocked = await blockedUsers(bot);
+      if (blocked.includes(tgId)) {
+        await reply("🚫 Access denied.");
+        return;
+      }
+      if (!ctx.session.approvalSent) {
+        ctx.session.approvalSent = true;
+        const admins = bot.isMain ? bot.adminTgIds : [bot.ownerTgId];
+        const notice =
+          `🆕 <b>New user started the bot</b>\n\n` +
+          `👤 Name: ${escapeHtml(ctx.firstName || "—")}\n` +
+          `Username: ${ctx.tgUsername ? `@${escapeHtml(ctx.tgUsername)}` : "—"}\n` +
+          `ID: <code>${tgId}</code>`;
+        for (const adminId of admins) {
+          await sendHtml(bot.token, adminId, notice, kb(
+            [btn("✅ Approve", `ap:ok:${tgId}`), btn("❌ Reject", `ap:no:${tgId}`)],
+          )).catch(() => {});
+        }
+      }
+      await reply("👋 <b>Welcome!</b>\n\n⏳ Your access request was sent to the admin. Please wait for approval.");
     }
     return;
   }
@@ -759,6 +789,43 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
 
   if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : shopMenu(ctx, reply); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
+
+  // ── New-user approval (admin only)
+  const apMatch = data.match(/^ap:(ok|no):(\d+)$/);
+  if (apMatch) {
+    if (!own) return;
+    const targetTg = Number(apMatch[2]);
+    if (apMatch[1] === "no") {
+      const blocked = await blockedUsers(bot);
+      if (!blocked.includes(targetTg)) {
+        blocked.push(targetTg);
+        await setSetting(bot, "blocked_users", JSON.stringify(blocked));
+      }
+      await sendHtml(bot.token, targetTg, "🚫 Your access request was rejected.").catch(() => {});
+      await reply(`🚫 Rejected user <code>${targetTg}</code>. They can no longer request access.`);
+      return;
+    }
+    // Approve: create an account with generated credentials and send them to the user.
+    const base = `user${String(targetTg).slice(-6)}`;
+    let uname = base;
+    for (let i = 1; ; i++) {
+      const { data: exists } = await db.from("bot_accounts").select("id").eq("tenant_id", bot.tenantId).eq("username", uname).maybeSingle();
+      if (!exists) break;
+      uname = `${base}${i}`;
+    }
+    const pass = Array.from(crypto.getRandomValues(new Uint8Array(6))).map(b => "abcdefghjkmnpqrstuvwxyz23456789"[b % 31]).join("") + String(targetTg % 100).padStart(2, "0");
+    const hash = await hashPassword(bot.tenantId, uname, pass);
+    const { data: acc, error } = await db.from("bot_accounts").insert({ tenant_id: bot.tenantId, username: uname, password_hash: hash, tg_id: targetTg, balance: 0 }).select("id").single();
+    if (error || !acc) { await reply("⚠️ Could not create the account. Try again."); return; }
+    await sendHtml(bot.token, targetTg,
+      `✅ <b>Approved!</b> Your account is ready.\n\n` +
+      `👤 Username: <code>${escapeHtml(uname)}</code>\n` +
+      `🔑 Password: <code>${escapeHtml(pass)}</code>\n\n` +
+      `Send /start and log in with these credentials.`).catch(() => {});
+    await reply(`✅ Approved <code>${targetTg}</code> — account <code>${escapeHtml(uname)}</code> created and credentials sent.`);
+    return;
+  }
+
 
   if (data.startsWith("a:colors")) {
     if (!own) return;
