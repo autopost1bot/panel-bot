@@ -11,7 +11,7 @@ import {
 } from "./tg";
 
 import { EMOJI_ICONS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, type EmojiTheme } from "./emoji";
-import { BUTTON_COLORS, isButtonColor, parseButtonColors } from "./colors";
+import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "./colors";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
 const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Manage", stock: "📦 Stock", stats: "📊 Statistics" };
@@ -351,17 +351,30 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
   ));
 }
 
-async function colorsMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
+async function colorsMenu(ctx: Ctx, reply: (h: string, e?: any) => any, requested = 0, selected?: string) {
   const colors = parseButtonColors(ctx.emoji.buttons);
+  const pages = Math.ceil(COLOR_BUTTONS.length / 8);
+  const page = Math.max(0, Math.min(requested, pages - 1));
+  const items = COLOR_BUTTONS.slice(page * 8, page * 8 + 8);
+  const colorOf = (id: string) => colors.items?.[id] ?? "default";
+  const colorLabel = (id: string) => BUTTON_COLORS.find(color => color.value === colorOf(id))?.label ?? "Default";
   const rows: any[][] = [];
-  for (const group of ["inline", "keyboard"] as const) {
+  const item = COLOR_BUTTONS.find(button => button.id === selected);
+  if (item) {
     rows.push(BUTTON_COLORS.map(color => ({
-      ...btn(`${colors[group] === color.value ? "✓ " : ""}${color.label}`, `a:colors:${group}:${color.value}`),
+      ...btn(`${colorOf(item.id) === color.value ? "✓ " : ""}${color.value === "default" ? "Remove color" : color.label}`, `a:colors:set:${item.id}:${color.value}:${page}`),
       ...(color.value === "default" ? {} : { style: color.value }),
     })));
+    rows.push([btn("⬅️ Go back", `a:colors:page:${page}`)]);
+    return reply(`🎨 <b>${item.label} button</b>\n\nCurrent: ${colorLabel(item.id)}`, kb(...rows));
   }
+  for (const button of items) rows.push([btn(`${colorLabel(button.id)} · ${button.label} button`, `a:colors:item:${button.id}:${page}`)]);
+  const nav = [];
+  if (page > 0) nav.push(btn("⬅️ Previous", `a:colors:page:${page - 1}`));
+  if (page + 1 < pages) nav.push(btn("Next ➡️", `a:colors:page:${page + 1}`));
+  if (nav.length) rows.push(nav);
   rows.push([btn("⬅️ Go back", "a:home")]);
-  await reply("🎨 <b>Button colors</b>\n\n<b>First row: Message buttons</b>\n<b>Second row: Bottom keyboard</b>\n\n✓ Selected color", kb(...rows));
+  await reply(`🎨 <b>Button Colors (${page + 1}/${pages})</b>\n\n${items.map(button => `· ${button.label} — ${colorLabel(button.id)}`).join("\n")}`, kb(...rows));
 }
 
 async function emojiMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
@@ -751,6 +764,20 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     if (!own) return;
     ctx.session.step = null;
     if (data === "a:colors") return colorsMenu(ctx, reply);
+    const pageMatch = data.match(/^a:colors:page:(\d+)$/);
+    if (pageMatch) return colorsMenu(ctx, reply, Number(pageMatch[1]));
+    const itemMatch = data.match(/^a:colors:item:([a-z_]+):(\d+)$/);
+    if (itemMatch && COLOR_BUTTONS.some(button => button.id === itemMatch[1])) return colorsMenu(ctx, reply, Number(itemMatch[2]), itemMatch[1]);
+    const setMatch = data.match(/^a:colors:set:([a-z_]+):(default|primary|success|danger):(\d+)$/);
+    if (setMatch && COLOR_BUTTONS.some(button => button.id === setMatch[1]) && isButtonColor(setMatch[2])) {
+      const colors = parseButtonColors(ctx.emoji.buttons);
+      // Explicit default overrides legacy group-wide preferences too.
+      colors.items = { ...colors.items, [setMatch[1]]: setMatch[2] };
+      ctx.emoji.buttons = colors;
+      await setSetting(bot, "premium_emoji", JSON.stringify(ctx.emoji));
+      await sendHtml(bot.token, ctx.chatId, "✅ Button color updated.", themeExtra(menuKb(ctx), ctx.emoji));
+      return colorsMenu(ctx, reply, Number(setMatch[3]));
+    }
     const match = data.match(/^a:colors:(inline|keyboard):(default|primary|success|danger)$/);
     if (!match || !isButtonColor(match[2])) return;
     const group = match[1] as "inline" | "keyboard";
