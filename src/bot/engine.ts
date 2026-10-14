@@ -11,6 +11,7 @@ import {
 } from "./tg";
 
 import { EMOJI_ICONS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, type EmojiTheme } from "./emoji";
+import { BUTTON_COLORS, isButtonColor, parseButtonColors } from "./colors";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
 const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Manage", stock: "📦 Stock", stats: "📊 Statistics" };
@@ -345,9 +346,22 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("👤 Add account", "a:acc"), btn("💰 Add balance", "a:bal")],
     [btn("📊 Orders & profit", "a:stats"), btn("📣 Broadcast", "a:bc")],
     [btn("👋 Welcome text", "a:wel"), btn(hidden ? "👁 Show prices" : "🙈 Hide prices", "a:hide")],
-    [btn("✨ Premium emoji", "a:emoji")],
+    [btn("✨ Premium emoji", "a:emoji"), btn("🎨 Button colors", "a:colors")],
     ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb")]] : []),
   ));
+}
+
+async function colorsMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
+  const colors = parseButtonColors(ctx.emoji.buttons);
+  const rows: any[][] = [];
+  for (const group of ["inline", "keyboard"] as const) {
+    rows.push(BUTTON_COLORS.map(color => ({
+      ...btn(`${colors[group] === color.value ? "✓ " : ""}${color.label}`, `a:colors:${group}:${color.value}`),
+      ...(color.value === "default" ? {} : { style: color.value }),
+    })));
+  }
+  rows.push([btn("⬅️ Go back", "a:home")]);
+  await reply("🎨 <b>Button colors</b>\n\n<b>First row: Message buttons</b>\n<b>Second row: Bottom keyboard</b>\n\n✓ Selected color", kb(...rows));
 }
 
 async function emojiMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
@@ -732,6 +746,24 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
 
   if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : shopMenu(ctx, reply); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
+
+  if (data.startsWith("a:colors")) {
+    if (!own) return;
+    ctx.session.step = null;
+    if (data === "a:colors") return colorsMenu(ctx, reply);
+    const match = data.match(/^a:colors:(inline|keyboard):(default|primary|success|danger)$/);
+    if (!match || !isButtonColor(match[2])) return;
+    const group = match[1] as "inline" | "keyboard";
+    const colors = parseButtonColors(ctx.emoji.buttons);
+    colors[group] = match[2];
+    ctx.emoji.buttons = colors;
+    await setSetting(bot, "premium_emoji", JSON.stringify(ctx.emoji));
+    // A reply keyboard is replaced with a fresh message, not editMessageText.
+    if (group === "keyboard") {
+      await sendHtml(bot.token, ctx.chatId, "✅ Bottom keyboard color updated.", themeExtra(menuKb(ctx), ctx.emoji));
+    }
+    return colorsMenu(ctx, reply);
+  }
 
   // Emoji settings are strictly scoped to the authenticated Telegram owner.
   if (data.startsWith("a:emoji") && !own) return;

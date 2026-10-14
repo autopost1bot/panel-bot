@@ -1,7 +1,8 @@
 import { escapeHtml, extractEmojiId, iconButton, plainLabel } from "./tg";
+import { colorExtra, parseButtonColors, type ButtonColors } from "./colors";
 
 export const EMOJI_ICONS = ["🛍", "🏛", "🚀", "🔧", "📦", "📊", "➕", "📂", "👤", "💰", "📣", "👋", "🙈", "👁", "🤖", "🔑", "🧾", "📜", "⬅️", "✖️", "✅", "📝", "⏱", "💵", "🛒", "🔢", "🏠", "✏️", "🗑", "📋", "🔐", "❌", "⚠️", "⭐", "📅", "🟢", "🔍", "🔓", "➖", "📄", "💲", "🎉", "🛠", "⛔️", "✉️", "👥", "🏷", "🔎", "📈", "📉", "💳", "💸", "🔄", "🔙", "📌", "👉", "➡️"];
-export type EmojiTheme = { enabled: boolean; icons: Record<string, string> };
+export type EmojiTheme = { enabled: boolean; icons: Record<string, string>; buttons?: ButtonColors };
 export function parseEmojiTheme(raw: string | null): EmojiTheme {
   try {
     const value = JSON.parse(raw ?? "{}");
@@ -9,7 +10,7 @@ export function parseEmojiTheme(raw: string | null): EmojiTheme {
     for (const icon of EMOJI_ICONS) {
       if (typeof value.icons?.[icon] === "string" && extractEmojiId(value.icons[icon])) icons[icon] = value.icons[icon];
     }
-    return { enabled: value.enabled !== false, icons };
+    return { enabled: value.enabled !== false, icons, buttons: parseButtonColors(value.buttons) };
   } catch { return { enabled: true, icons: {} }; }
 }
 export function emojiTag(text: string, entities: { type: string; offset: number; length: number; custom_emoji_id?: string }[]): string | null {
@@ -30,6 +31,7 @@ export function themeHtml(html: string, theme: EmojiTheme): string {
     .map(part => part.startsWith("<") ? part : part.replace(/(?:\p{Extended_Pictographic}|\p{Regional_Indicator})(?:\uFE0F)?/gu, icon => theme.icons[icon] ?? icon)).join("");
 }
 export function themeExtra(extra: Record<string, any>, theme: EmojiTheme): Record<string, any> {
+  extra = colorExtra(extra, theme.buttons);
   const markup = extra['reply_markup'];
   if (!markup) return extra;
   const key = markup.inline_keyboard ? "inline_keyboard" : markup.keyboard ? "keyboard" : null;

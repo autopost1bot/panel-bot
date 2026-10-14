@@ -122,7 +122,7 @@ const toPlain = (html: string) =>
     .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&")
     .trim();
 
-/** Strip unsupported Premium icons on retry, preserving keyboard actions. */
+/** Strip rejected appearance fields on retry, preserving keyboard actions. */
 const ordinaryExtra = (extra: Record<string, any>) => {
   const markup = extra['reply_markup'];
   if (!markup) return extra;
@@ -130,7 +130,7 @@ const ordinaryExtra = (extra: Record<string, any>) => {
   if (!key) return extra;
   return { ...extra, reply_markup: { ...markup, [key]: markup[key].map((row: any[]) => row.map(button => {
     if (typeof button === "string") return button;
-    const { icon_custom_emoji_id, ...rest } = button;
+    const { icon_custom_emoji_id, style, ...rest } = button;
     return rest;
   })) } };
 };
