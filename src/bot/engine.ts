@@ -10,7 +10,7 @@ import {
   editHtml, sendHtml, tgCall, webhookSecret, type TgEntity,
 } from "./tg";
 
-import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, type EmojiTheme } from "./emoji";
+import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, titlePrefix, type EmojiTheme } from "./emoji";
 import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "./colors";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
@@ -975,7 +975,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     const { data: c } = await db.from("categories").select("*").eq("id", cid).eq("tenant_id", bot.tenantId).maybeSingle();
     if (!c) return;
     const ps = await topProducts(db, bot.tenantId, cid);
-    await reply(`📂 <b>${c.name}</b>\n${ps.length} product(s)`, kb(
+    await reply(`${titlePrefix("📂", c.name)}<b>${c.name}</b>\n${ps.length} product(s)`, kb(
       ...ps.map((p) => [btn(`${p.name} · ${priceLabel(p)} · stock ${p.stock}`, `a:p:${p.id}`)]),
       [btn("➕ Add product here", `a:addc:${cid}`)],
       [btn("✏️ Rename", `a:cn:${cid}`), btn("🗑 Delete", `a:cdel:${cid}`)], [btn("⬅️ Categories", "a:cats")]));
@@ -1131,10 +1131,10 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     for (const group of [...cs.map((c) => ({ id: c.id as number | null, name: c.name })), { id: null, name: "No category" }]) {
       const gp = ps.filter((p) => (p.category_id ?? null) === group.id);
       if (!gp.length) continue;
-      lines.push("", `📂 <b>${group.name}</b>`);
+      lines.push("", `${titlePrefix("📂", group.name)}<b>${group.name}</b>`);
       for (const p of gp) {
         const vars = Number(p.nvars) ? await variantsOf(db, tid, Number(p.id)) : [];
-        lines.push(`🛒 <b>${p.name}</b>` + (vars.length ? "" : ` · ${money(p.price)} · stock ${p.stock}`));
+        lines.push(`${titlePrefix("🛒", p.name)}<b>${p.name}</b>` + (vars.length ? "" : ` · ${money(p.price)} · stock ${p.stock}`));
         for (const v of vars) lines.push(`   · ${v.name} · ${money(v.price)} · stock ${v.stock}`);
       }
     }
@@ -1171,7 +1171,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
         ...ps.map((p) => [btn(`${p.name}${Number(p.nvars) ? "" : " – " + money(p.price)}`, `c:p:${p.id}`)]), [btn("⬅️ Go back", "c:shop")]));
       return;
     }
-    await reply(`📂 <b>${c?.name ?? ""}</b>\nChoose a product:`, kb(...productButtons(ps), [btn("⬅️ Back", "c:shop")]));
+    await reply(`${titlePrefix("📂", c?.name ?? "")}<b>${c?.name ?? ""}</b>\nChoose a product:`, kb(...productButtons(ps), [btn("⬅️ Back", "c:shop")]));
     return;
   }
   if ((m = data.match(/^c:p:(\d+)$/))) {
@@ -1262,7 +1262,7 @@ async function adminProduct(ctx: Ctx, reply: (h: string, e?: any) => any, pid: n
   }
   const { data: cat } = p.category_id ? await db.from("categories").select("name").eq("id", p.category_id).maybeSingle() : { data: null };
   const vars = await variantsOf(db, ctx.bot.tenantId, pid);
-  const head = `${p.name}\n📂 ${cat ? cat.name : "No category"}\n${p.description ? p.description + "\n" : ""}`;
+  const head = `${p.name}\n${titlePrefix("📂", cat ? cat.name : "No category")}${cat ? cat.name : "No category"}\n${p.description ? p.description + "\n" : ""}`;
   if (vars.length) {
     await reply(head + `\n⏱ ${vars.length} variant(s) · 📦 total stock ${p.stock}\nTap a variant to add keys / change price:`, kb(
       ...vars.map((v) => [btn(`${v.name} · ${money(v.price)} · stock ${v.stock}`, `a:p:${v.id}`)]),
@@ -1289,9 +1289,9 @@ async function stockView(ctx: Ctx, reply: (h: string, e?: any) => any) {
   for (const p of ps) {
     const vars = await variantsOf(db, ctx.bot.tenantId, Number(p.id));
     if (vars.length) {
-      out += `\n🛒 <b>${p.name}</b>\n` + vars.map((v) => `· ${v.name}: <b>${v.stock}</b>${Number(v.stock) ? "" : " ❌"}`).join("\n") + "\n";
+      out += `\n${titlePrefix("🛒", p.name)}<b>${p.name}</b>\n` + vars.map((v) => `· ${v.name}: <b>${v.stock}</b>${Number(v.stock) ? "" : " ❌"}`).join("\n") + "\n";
     } else {
-      out += `\n🛒 <b>${p.name}</b>: <b>${p.stock}</b>${Number(p.stock) ? "" : " ❌"}\n`;
+      out += `\n${titlePrefix("🛒", p.name)}<b>${p.name}</b>: <b>${p.stock}</b>${Number(p.stock) ? "" : " ❌"}\n`;
     }
   }
   await reply(out, kb([btn("⬅️ Back", "a:home")]));
