@@ -25,6 +25,14 @@ async function adminIds(): Promise<number[]> {
 }
 
 const mainSecret = await webhookSecret(ADMIN_BOT_TOKEN);
+// Token -> reseller bot id (status/expiry is still checked fresh per update).
+const tenantCache = new Map<string, { at: number; id: number; owner_tg_id: number }>();
+const secretCache = new Map<string, string>();
+async function cachedSecret(token: string): Promise<string> {
+  let s = secretCache.get(token);
+  if (!s) { s = await webhookSecret(token); secretCache.set(token, s); }
+  return s;
+}
 
 async function readJson(req: import("node:http").IncomingMessage): Promise<any> {
   const chunks: Buffer[] = [];
@@ -52,12 +60,17 @@ const server = createServer(async (req, res) => {
     const m = url.pathname.match(/^\/tenant\/(.+)$/);
     if (m) {
       const token = decodeURIComponent(m[1]!);
-      if (!TOKEN_RE.test(token) || secret !== (await webhookSecret(token))) { res.writeHead(401); res.end(); return; }
+      if (!TOKEN_RE.test(token) || secret !== (await cachedSecret(token))) { res.writeHead(401); res.end(); return; }
       const update = await readJson(req);
       ok();
       if (!update) return;
-      const db = await getDb();
-      const { data: t } = await db.from("tenant_bots").select("id, owner_tg_id").eq("token", token).maybeSingle();
+      let t = tenantCache.get(token);
+      if (!t || Date.now() - t.at > 60_000) {
+        const db = await getDb();
+        const { data } = await db.from("tenant_bots").select("id, owner_tg_id").eq("token", token).maybeSingle();
+        t = data ? { at: Date.now(), id: data.id, owner_tg_id: data.owner_tg_id } : undefined;
+        if (t) tenantCache.set(token, t); else tenantCache.delete(token);
+      }
       if (t) handleUpdate({ token, tenantId: t.id, ownerTgId: Number(t.owner_tg_id), isMain: false, adminTgIds: [] }, update)
         .catch((e) => console.error("reseller bot update failed", e));
       return;
