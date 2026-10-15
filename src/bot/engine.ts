@@ -216,6 +216,28 @@ async function replyLines(reply: (h: string, e?: any) => any, lines: string[], e
 
 async function historyPage(ctx: Ctx, reply: (h: string, e?: any) => any, requested: number, prefix: string, accountId?: number) {
   const db = await getDb();
+  // Main bot: show the customer's reseller-bot subscription above their key orders.
+  let subLines: string[] = [];
+  if (prefix === "c:orders" && ctx.bot.isMain && accountId !== undefined) {
+    const { data: t } = await db.from("tenant_bots").select("*").eq("owner_account_id", accountId).maybeSingle();
+    if (t) {
+      const { data: pays } = await db.from("tenant_bot_payments").select("*").eq("tenant_id", t.id).order("id", { ascending: false });
+      const now = Date.now();
+      const exp = new Date(t.expires_at).getTime();
+      const live = t.status === "active" && exp > now;
+      const daysLeft = Math.max(0, Math.ceil((exp - now) / 86400000));
+      subLines = [
+        `🤖 Bot: <b>${t.bot_username ? "@" + escapeHtml(t.bot_username) : "not connected yet"}</b>`,
+        `📊 Status: ${live ? "🟢 Live" : t.status !== "active" ? "🔴 Disabled by admin" : "⛔️ Expired"}`,
+        `📅 Expires: <b>${fmtDate(t.expires_at)}</b>${live ? ` (${daysLeft} day${daysLeft === 1 ? "" : "s"} left)` : ""}`,
+        `💳 Payments (${(pays ?? []).length}):`,
+        ...((pays ?? []).slice(0, 20).map((p: any) => `· ${money(p.amount)} — ${p.days} day${p.days === 1 ? "" : "s"} · ${orderDate(p.created_at)}`)),
+        ...((pays ?? []).length ? [] : ["No payments recorded yet."]),
+        "",
+        "🛍 Key orders:",
+      ];
+    }
+  }
   const query = () => {
     const q = db.from("shop_orders").select("*", { count: "exact" }).eq("tenant_id", ctx.bot.tenantId);
     return accountId === undefined ? q : q.eq("account_id", accountId);
@@ -227,7 +249,7 @@ async function historyPage(ctx: Ctx, reply: (h: string, e?: any) => any, request
   const page = Math.min(Math.max(0, requested), pages - 1);
   const { data: orders, error } = await query().order("id", { ascending: false }).range(page * 10, page * 10 + 9);
   if (error) throw error;
-  const lines = [`🧾 <b>Purchase history</b> · Page ${page + 1}/${pages}`, `${total} order${total === 1 ? "" : "s"}`, ""];
+  const lines = [`🧾 <b>Purchase history</b> · Page ${page + 1}/${pages}`, `${total} order${total === 1 ? "" : "s"}`, "", ...subLines];
   for (const order of orders ?? []) {
     let username = "";
     if (accountId === undefined) {
