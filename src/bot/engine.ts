@@ -6,8 +6,8 @@
 
 import { getDb, hashPassword } from "./db";
 import {
-  btn, entitiesToHtml, escapeHtml, fmtDate, kb, money, plainLabel, urlBtn,
-  editHtml, sendHtml, tgCall, webhookSecret, type TgEntity,
+  btn, entitiesToHtml, escapeHtml, fmtDate, kb, money, plainLabel,
+  editHtml, sendHtml, tgCall, urlBtn, webhookSecret, type TgEntity,
 } from "./tg";
 
 import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, titlePrefix, type EmojiTheme } from "./emoji";
@@ -50,7 +50,7 @@ type Step =
   | { s: "set_desc"; pid: number } | { s: "add_keys"; pid: number }
   | { s: "cat_new"; then: "add" | "list" } | { s: "cat_name"; cid: number }
   | { s: "acc_user" } | { s: "acc_pass"; username: string } | { s: "bal_add" }
-  | { s: "broadcast" } | { s: "welcome" }
+  | { s: "broadcast" } | { s: "welcome" } | { s: "support" }
   | { s: "topup"; cid: number } | { s: "deduct"; cid: number }
   | { s: "buy_qty"; pid: number } | { s: "cprice"; cid: number; pid: number }
   | { s: "pay_amount"; net?: Network }
@@ -58,7 +58,7 @@ type Step =
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
 
-type Session = { accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined };
+type Session = { accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined };
 
 export type BotInfo = {
   token: string;
@@ -394,6 +394,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("👤 Add account", "a:acc"), btn("💰 Add balance", "a:bal")],
     [btn("📊 Orders & profit", "a:stats"), btn("📣 Broadcast", "a:bc")],
     [btn("👋 Welcome text", "a:wel"), btn(hidden ? "👁 Show prices" : "🙈 Hide prices", "a:hide")],
+    [btn("💬 Support username", "a:sup")],
     [btn("✨ Premium emoji", "a:emoji"), btn("🎨 Button colors", "a:colors")],
     ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb")]] : []),
   ));
@@ -451,12 +452,35 @@ async function emojiList(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "ic
 
 const pr = (ctx: Ctx, p: any) => ctx.hide ? "$" : money(ctx.prices.get(Number(p.id)) ?? p.price);
 
+/** Support contact username (without @) set by the admin, or null. */
+async function supportUsername(bot: BotInfo): Promise<string | null> {
+  const v = String((await getSetting(bot, "support_username")) ?? "").trim().replace(/^@/, "");
+  return /^[A-Za-z0-9_]{4,32}$/.test(v) ? v : null;
+}
+
+/** Inline buttons shown under the welcome message. */
+async function welcomeRows(ctx: Ctx): Promise<any[][]> {
+  const rows: any[][] = [[btn("🔑 Buy keys", "c:shop")], [btn("👤 Account", "c:me"), btn("🧾 My orders", "c:orders")]];
+  if (ctx.bot.isMain) rows.push([btn("💳 Add balance with Crypto", "pay:top")]);
+  const sup = await supportUsername(ctx.bot);
+  if (sup) rows.push([urlBtn("💬 Support", `https://t.me/${sup}`)]);
+  return rows;
+}
+
 async function shopMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
   const acc = await getAccount(ctx);
   const welcome = renderWelcome((await getSetting(ctx.bot, "welcome")) ?? DEFAULT_WELCOME, acc?.username ?? ctx.session.username);
-  const rows: any[][] = [[btn("🔑 Buy keys", "c:shop")], [btn("👤 Account", "c:me"), btn("🧾 My orders", "c:orders")]];
-  if (ctx.bot.isMain) rows.push([btn("💳 Add balance (USDT)", "pay:top")]);
-  await reply(`${welcome}\n\n💰 Balance: <b>${money(acc?.balance ?? 0)}</b>`, kb(...rows));
+  await reply(`${welcome}\n\n💰 Balance: <b>${money(acc?.balance ?? 0)}</b>`, kb(...(await welcomeRows(ctx))));
+}
+
+/** /start for a logged-in customer: welcome + inline buttons, and the
+ *  persistent bottom keyboard once per session. */
+async function startWelcome(ctx: Ctx, reply: (h: string, e?: any) => any) {
+  if (!ctx.session.kbShown) {
+    ctx.session.kbShown = true;
+    await reply("⌨️ Menu", menuKb(ctx));
+  }
+  return shopMenu(ctx, reply);
 }
 
 async function ask(ctx: Ctx, reply: (h: string, e?: any) => any, step: Step, text: string, extra?: any) {
@@ -487,7 +511,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     if (ctx.isBoss) {
       await reply("🛠 <b>Admin panel</b>\nUse the buttons below. Premium emoji you type are saved automatically.", menuKb(ctx));
     } else if (ctx.session.accountId) {
-      await reply(renderWelcome((await getSetting(bot, "welcome")) ?? DEFAULT_WELCOME, ctx.session.username), menuKb(ctx));
+      await startWelcome(ctx, reply);
     } else {
       const blocked = await blockedUsers(bot);
       if (blocked.includes(tgId)) {
@@ -520,7 +544,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         }
         if (!acc) { await reply("⚠️ Something went wrong. Please send /start again."); return; }
         ctx.session.accountId = acc.id; ctx.session.username = acc.username;
-        await reply(renderWelcome((await getSetting(bot, "welcome")) ?? DEFAULT_WELCOME, acc.username), menuKb(ctx));
+        await startWelcome(ctx, reply);
         return;
       }
       // Reseller bots: the owner must approve; the bot then generates username + password.
@@ -835,6 +859,15 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(`📣 Sent to ${ok}/${(cs ?? []).length} accounts.`, kb([btn("⬅️ Menu", "a:home")]));
       return;
     }
+    case "support": {
+      if (!ctx.isBoss) return;
+      const u = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
+      if (!/^[A-Za-z0-9_]{4,32}$/.test(u)) { await reply("❌ Send a valid Telegram username, e.g. @mysupport"); return; }
+      await setSetting(bot, "support_username", u);
+      ctx.session.step = null;
+      await reply(`✅ Support username saved: @${escapeHtml(u)}\nThe 💬 Support button now opens this chat.`, kb([btn("⬅️ Go back", "a:sup")]));
+      return;
+    }
     case "welcome": {
       if (!ctx.isBoss) return;
       await setSetting(bot, "welcome", html);
@@ -1124,6 +1157,21 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return;
   }
   if (data === "a:bc" && own) return ask(ctx, reply, { s: "broadcast" }, "📣 Send the message for all accounts (premium emoji allowed):");
+  if (data === "a:sup" && own) {
+    const sup = await supportUsername(bot);
+    await reply(`💬 <b>Support button</b>\n\nCurrent: ${sup ? "@" + escapeHtml(sup) : "— not set (button hidden)"}`, kb(
+      [btn(sup ? "✏️ Change username" : "✏️ Set username", "a:sup:set")],
+      ...(sup ? [[btn("🗑 Remove", "a:sup:del")]] : []),
+      [btn("⬅️ Go back", "a:home")],
+    ));
+    return;
+  }
+  if (data === "a:sup:set" && own) return ask(ctx, reply, { s: "support" }, "💬 Send the Telegram username for support (e.g. @mysupport):");
+  if (data === "a:sup:del" && own) {
+    await setSetting(bot, "support_username", "");
+    await reply("🗑 Support button removed.", kb([btn("⬅️ Go back", "a:sup")]));
+    return;
+  }
   if (data === "a:wel" && own) return ask(ctx, reply, { s: "welcome" }, "👋 Send the new welcome text (premium emoji allowed):\n\nUse <code>{name}</code> where the account name should appear.");
   if (data === "a:stock" && own) return stockView(ctx, reply);
 
