@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { getDb } from "./bot/db";
 import { handleUpdate } from "./bot/engine";
 import { sendHtml, tgCall, webhookSecret } from "./bot/tg";
+import { scanPayments } from "./bot/crypto";
 
 const PORT = Number(process.env["PORT"] ?? 3000);
 const PUBLIC_URL = (process.env["PUBLIC_URL"] ?? "").replace(/\/+$/, "");
@@ -112,4 +113,8 @@ server.listen(PORT, async () => {
   } catch (e) { console.error("webhook setup failed", e); }
   void expiryCheck();
   setInterval(expiryCheck, 60 * 60 * 1000);
+  // Every minute: verify incoming BEP20 USDT payments automatically.
+  const cryptoScan = () => scanPayments("main").catch((e) => console.error("crypto scan failed", e));
+  void cryptoScan();
+  setInterval(cryptoScan, 60 * 1000);
 });
