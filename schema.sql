@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_payments (
   paid_at timestamptz
 );
 ALTER TABLE public.crypto_payments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_payments ADD COLUMN IF NOT EXISTS network text NOT NULL DEFAULT 'bep20';
 
 -- Credits the payment: subscription -> activate/renew the bot, top-up -> balance.
 CREATE OR REPLACE FUNCTION public.fulfill_crypto_payment(p_id integer, p_tx text)
@@ -123,7 +124,7 @@ BEGIN
       expires_at = GREATEST(tenant_bots.expires_at, now()) + make_interval(days => days),
       status = 'active', reminded = 0, owner_tg_id = EXCLUDED.owner_tg_id
     RETURNING * INTO t;
-    INSERT INTO tenant_bot_payments (tenant_id, amount, days, note) VALUES (t.id, p.amount, days, 'crypto-bep20');
+    INSERT INTO tenant_bot_payments (tenant_id, amount, days, note) VALUES (t.id, p.amount, days, 'crypto-' || COALESCE(p.network, 'bep20'));
     RETURN jsonb_build_object('ok', true, 'kind', 'sub', 'amount', p.amount, 'expires_at', t.expires_at, 'balance', COALESCE(cu.balance, 0));
   END IF;
 
