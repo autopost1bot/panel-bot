@@ -1400,7 +1400,7 @@ async function showMyBot(ctx: Ctx, reply: (h: string, e?: any) => any) {
   const active = t && t.status === "active" && new Date(t.expires_at) > new Date();
   if (!t) {
     await reply(
-      `🤖 <b>Make your own bot</b>\n\nLaunch your own reseller bot in minutes — you are the admin:\n• Add products, set prices & costs\n• Load stock keys and sell instantly\n• Manage accounts & balances\n• Track orders & profit, broadcast to customers\n• Premium emoji supported automatically\n\n💵 Price: <b>${money(price)}</b> / ${days} days (paid from your balance)`,
+      `🤖 <b>Make your own bot</b>\n\nLaunch your own reseller bot in minutes — you are the admin:\n• Add products, set prices & costs\n• Load stock keys and sell instantly\n• Manage accounts & balances\n• Track orders & profit, broadcast to resellers\n• Premium emoji supported automatically\n\n💵 Price: <b>${money(price)}</b> / ${days} days (paid from your balance)`,
       kb([btn(`🚀 Make my bot — ${money(price)}`, "tsub:buy")]));
     return;
   }
