@@ -15,6 +15,19 @@ import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
 const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Manage", stock: "📦 Stock", stats: "📊 Statistics" };
+
+// ─── Welcome message ─────────────────────────────────────────────────────────
+// Professional default shown on /start and in the shop menu. {name} is replaced
+// with the account name (or the visitor's first name before approval), so every
+// user is greeted personally without any admin setup.
+const DEFAULT_WELCOME =
+  "👋 <b>Welcome, {name}!</b>\n\n" +
+  "🛒 Your trusted store for digital game keys.\n" +
+  "🔑 Buy keys instantly — fast, automatic delivery.\n" +
+  "💰 Track your balance and order history anytime.";
+
+const renderWelcome = (html: string, name: string | null | undefined): string =>
+  html.replace(/\{name\}/gi, name ? escapeHtml(name) : "Guest");
 const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
 const APP_BASE = (process.env["PUBLIC_URL"] ?? "").replace(/\/+$/, "");
 
@@ -416,7 +429,7 @@ const pr = (ctx: Ctx, p: any) => ctx.hide ? "$" : money(ctx.prices.get(Number(p.
 
 async function shopMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
   const acc = await getAccount(ctx);
-  const welcome = (await getSetting(ctx.bot, "welcome")) ?? "👋 <b>Welcome!</b>";
+  const welcome = renderWelcome((await getSetting(ctx.bot, "welcome")) ?? DEFAULT_WELCOME, acc?.username ?? ctx.session.username);
   await reply(`${welcome}\n\n💰 Balance: <b>${money(acc?.balance ?? 0)}</b>`, kb(
     [btn("🔑 Buy keys", "c:shop")], [btn("👤 Account", "c:me"), btn("🧾 My orders", "c:orders")]));
 }
@@ -449,7 +462,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     if (ctx.isBoss) {
       await reply("🛠 <b>Admin panel</b>\nUse the buttons below. Premium emoji you type are saved automatically.", menuKb(ctx));
     } else if (ctx.session.accountId) {
-      await reply((await getSetting(bot, "welcome")) ?? "👋 <b>Welcome!</b>", menuKb(ctx));
+      await reply(renderWelcome((await getSetting(bot, "welcome")) ?? DEFAULT_WELCOME, ctx.session.username), menuKb(ctx));
     } else {
       const blocked = await blockedUsers(bot);
       if (blocked.includes(tgId)) {
@@ -482,7 +495,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         }
         if (!acc) { await reply("⚠️ Something went wrong. Please send /start again."); return; }
         ctx.session.accountId = acc.id; ctx.session.username = acc.username;
-        await reply((await getSetting(bot, "welcome")) ?? "👋 <b>Welcome!</b>", menuKb(ctx));
+        await reply(renderWelcome((await getSetting(bot, "welcome")) ?? DEFAULT_WELCOME, acc.username), menuKb(ctx));
         return;
       }
       // Reseller bots: the owner must approve; the bot then generates username + password.
@@ -500,7 +513,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
           )).catch(() => {});
         }
       }
-      await reply("👋 <b>Welcome!</b>\n\n⏳ Your access request was sent to the admin. Please wait for approval.");
+      await reply(renderWelcome((await getSetting(bot, "welcome")) ?? DEFAULT_WELCOME, ctx.firstName) + "\n\n⏳ Your access request was sent to the admin. Please wait for approval.");
     }
     return;
   }
@@ -1060,7 +1073,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return;
   }
   if (data === "a:bc" && own) return ask(ctx, reply, { s: "broadcast" }, "📣 Send the message for all accounts (premium emoji allowed):");
-  if (data === "a:wel" && own) return ask(ctx, reply, { s: "welcome" }, "👋 Send the new welcome text (premium emoji allowed):");
+  if (data === "a:wel" && own) return ask(ctx, reply, { s: "welcome" }, "👋 Send the new welcome text (premium emoji allowed):\n\nUse <code>{name}</code> where the account name should appear.");
   if (data === "a:stock" && own) return stockView(ctx, reply);
 
   // ── One-click hide/show prices for customers
