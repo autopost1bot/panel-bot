@@ -547,22 +547,19 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         await startWelcome(ctx, reply);
         return;
       }
-      // Reseller bots: the owner must approve; the bot then generates username + password.
+      // Reseller bots: notify the owner once, then ask for the username + password the owner created.
       if (!ctx.session.approvalSent) {
         ctx.session.approvalSent = true;
-        const admins = bot.isMain ? bot.adminTgIds : [bot.ownerTgId];
         const notice =
           `🆕 <b>New user started the bot</b>\n\n` +
           `👤 Name: ${escapeHtml(ctx.firstName || "—")}\n` +
           `Username: ${ctx.tgUsername ? `@${escapeHtml(ctx.tgUsername)}` : "—"}\n` +
-          `ID: <code>${tgId}</code>`;
-        for (const adminId of admins) {
-          await sendHtml(bot.token, adminId, notice, kb(
-            [btn("✅ Approve", `ap:ok:${tgId}`), btn("❌ Reject", `ap:no:${tgId}`)],
-          )).catch(() => {});
-        }
+          `ID: <code>${tgId}</code>\n\n` +
+          `Create an account for them from 🛠 Admin panel → 👤 Add account and send them the username + password.`;
+        await sendHtml(bot.token, bot.ownerTgId, notice).catch(() => {});
       }
-      await reply(renderWelcome((await getSetting(bot, "welcome")) ?? DEFAULT_WELCOME, ctx.firstName) + "\n\n⏳ Your access request was sent to the admin. Please wait for approval.");
+      ctx.session.step = { s: "login_user" };
+      await reply(renderWelcome((await getSetting(bot, "welcome")) ?? DEFAULT_WELCOME, ctx.firstName) + "\n\n🔐 Please log in.\n👤 Send your <b>username</b>:");
     }
     return;
   }
