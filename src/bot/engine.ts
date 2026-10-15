@@ -27,6 +27,11 @@ const DEFAULT_WELCOME =
   "🔑 Buy keys instantly — fast, automatic delivery.\n" +
   "💰 Track your balance and order history anytime.";
 
+// Short greeting a reseller bot shows before sign-in. The login prompt follows it,
+// so the very first screen stays clean until the customer has logged in.
+const DEFAULT_LOGIN_WELCOME = "👋 <b>Welcome, {name}!</b>";
+
+
 const renderWelcome = (html: string, name: string | null | undefined): string =>
   html.replace(/\{name\}/gi, name ? escapeHtml(name) : "Guest");
 const TOKEN_RE = /^\d{6,12}:[A-Za-z0-9_-]{30,}$/;
@@ -559,7 +564,8 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         await sendHtml(bot.token, bot.ownerTgId, notice).catch(() => {});
       }
       ctx.session.step = { s: "login_user" };
-      await reply(renderWelcome((await getSetting(bot, "welcome")) ?? DEFAULT_WELCOME, ctx.firstName) + "\n\n🔐 Please log in.\n👤 Send your <b>username</b>:");
+      const greet = renderWelcome((await getSetting(bot, "welcome")) ?? DEFAULT_LOGIN_WELCOME, ctx.firstName);
+      await reply(`${greet}\n\n🔐 Please log in.\n\n👤 Send your <b>username</b>:`);
     }
     return;
   }
