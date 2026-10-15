@@ -43,6 +43,11 @@ export function replaceNameIcon(name: string, tag: string | null): string {
     .replace(/^(?:(?:\p{Extended_Pictographic}|\p{Regional_Indicator})(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*\s*)+/u, "").trim();
   return tag ? `${tag} ${without}` : without;
 }
+// Empty prefix when the name already starts with its own emoji, so titles never show two icons side by side.
+export function titlePrefix(icon: string, name: string): string {
+  if (/^\s*<tg-emoji\s+emoji-id="\d+"/.test(name)) return "";
+  return /^(?:(?:\p{Extended_Pictographic}|\p{Regional_Indicator})(?:\uFE0F|\p{Emoji_Modifier})?(?:\u200D\p{Extended_Pictographic}(?:\uFE0F|\p{Emoji_Modifier})?)*\s*)/u.test(name) ? "" : `${icon} `;
+}
 export function themeHtml(html: string, theme: EmojiTheme): string {
   if (!theme.enabled) return html.replace(/<tg-emoji\s+emoji-id="\d+">([\s\S]*?)<\/tg-emoji>/g, "$1");
   // Never touch keys, usernames or existing custom emoji entities.
