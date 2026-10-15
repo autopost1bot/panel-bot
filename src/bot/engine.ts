@@ -266,8 +266,8 @@ async function blockedUsers(bot: BotInfo): Promise<number[]> {
   }
 }
 async function getPrice(bot: BotInfo): Promise<number> {
-  const v = Number((await getSetting(bot, "bot_price")) ?? 20);
-  return Number.isFinite(v) && v > 0 ? v : 20;
+  const v = Number((await getSetting(bot, "bot_price")) ?? 30);
+  return Number.isFinite(v) && v > 0 ? v : 30;
 }
 async function getDays(bot: BotInfo): Promise<number> {
   const v = Number((await getSetting(bot, "bot_days")) ?? 30);
