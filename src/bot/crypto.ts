@@ -8,7 +8,11 @@ import { sendHtml, money, escapeHtml } from "./tg";
 
 export const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"; // USDT on BSC, 18 decimals
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+// Order matters: many public nodes refuse eth_getLogs ("limit exceeded"),
+// publicnode answers it for 5000-block ranges.
 const RPCS = [
+  "https://bsc-rpc.publicnode.com",
+  "https://bsc-mainnet.public.blastapi.io",
   "https://bsc-dataseed1.defibit.io",
   "https://bsc-dataseed.binance.org",
   "https://rpc.ankr.com/bsc",
