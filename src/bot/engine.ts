@@ -551,7 +551,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
   if (matchesMenu(L.acc)) {
     ctx.session.step = null;
     const acc = await getAccount(ctx);
-    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb([btn("📜 Purchase History", "c:orders")]));
+    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb(...(ctx.bot.isMain ? [[btn("💳 Add balance with Crypto", "pay:top")]] : []), [btn("📜 Purchase History", "c:orders")]));
     return;
   }
   if (matchesMenu(L.out)) {
@@ -576,7 +576,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
   if (low.includes("my orders") || low === "account") {
     ctx.session.step = null;
     const acc = await getAccount(ctx);
-    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb([btn("📜 Purchase History", "c:orders")]));
+    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb(...(ctx.bot.isMain ? [[btn("💳 Add balance with Crypto", "pay:top")]] : []), [btn("📜 Purchase History", "c:orders")]));
     return;
   }
 
@@ -1270,7 +1270,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   }
   if (data === "c:me") {
     const acc = await getAccount(ctx);
-    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb([btn("📜 Purchase History", "c:orders")], [btn("⬅️ Go back", "c:home")]));
+    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb(...(ctx.bot.isMain ? [[btn("💳 Add balance with Crypto", "pay:top")]] : []), [btn("📜 Purchase History", "c:orders")], [btn("⬅️ Go back", "c:home")]));
     return;
   }
   if ((m = data.match(/^c:orders(?::(\d+))?$/))) {
