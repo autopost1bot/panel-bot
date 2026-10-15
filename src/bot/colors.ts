@@ -22,6 +22,8 @@ export const COLOR_BUTTONS = [
   { id: "categories", label: "Categories", actions: ["a:cats"] },
   { id: "add_account", label: "Add account", actions: ["a:acc"] },
   { id: "add_balance", label: "Add balance", actions: ["a:bal"] },
+  { id: "add_crypto", label: "Add balance with Crypto", aliases: ["Add balance (USDT)"], actions: ["pay:top"] },
+  { id: "support", label: "Support", aliases: ["Support username"], actions: ["a:sup"] },
   { id: "broadcast", label: "Broadcast", actions: ["a:bc"] },
   { id: "welcome", label: "Welcome text", actions: ["a:wel"] },
   { id: "hide", label: "Hide / Show prices", aliases: ["Hide prices", "Show prices"], actions: ["a:hide"] },
