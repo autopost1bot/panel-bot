@@ -22,7 +22,32 @@ git fetch -q origin "$BRANCH" || exit 0
 LOCAL="$(git rev-parse HEAD)"
 REMOTE="$(git rev-parse "origin/$BRANCH")"
 
+# Apply schema.sql whenever its contents changed since the last successful
+# apply (also catches databases that missed an earlier update), then make the
+# database API reload so new tables are visible to the bot immediately.
+apply_schema() {
+  [ -f "$APP_DIR/schema.sql" ] || return 0
+  local HASH_FILE="$APP_DIR/.schema.applied"
+  local NEW_HASH; NEW_HASH="$(sha256sum "$APP_DIR/schema.sql" | cut -d' ' -f1)"
+  [ "$(cat "$HASH_FILE" 2>/dev/null)" = "$NEW_HASH" ] && return 0
+  echo "[$(date -u '+%F %T UTC')] applying schema.sql" >> "$LOG"
+  local PSQL="psql"
+  if command -v runuser >/dev/null 2>&1; then PSQL="runuser -u postgres -- psql"
+  elif command -v sudo >/dev/null 2>&1; then PSQL="sudo -u postgres psql"; fi
+  if $PSQL -v ON_ERROR_STOP=1 -d panelbot -f "$APP_DIR/schema.sql" >> "$LOG" 2>&1; then
+    echo "$NEW_HASH" > "$HASH_FILE"
+    $PSQL -d panelbot -c "NOTIFY pgrst, 'reload schema';" >> "$LOG" 2>&1
+    systemctl restart postgrest >> "$LOG" 2>&1 || true
+    sleep 2
+    echo "[$(date -u '+%F %T UTC')] schema applied, database API reloaded" >> "$LOG"
+    return 1   # signal: restart the bot too
+  fi
+  echo "[$(date -u '+%F %T UTC')] schema.sql FAILED (see above)" >> "$LOG"
+  return 0
+}
+
 if [ "$LOCAL" = "$REMOTE" ]; then
+  if ! apply_schema; then "$PM2" restart "$APP_NAME" --update-env >> "$LOG" 2>&1; fi
   exit 0                # nothing new, do not touch the running bot
 fi
 
@@ -35,12 +60,8 @@ if ! git diff -q "$LOCAL" "$REMOTE" -- package.json package-lock.json >/dev/null
   npm install --silent >> "$LOG" 2>&1
 fi
 
-# Apply schema changes that came with the new code (every statement is
-# idempotent, so re-running it on an up-to-date database changes nothing).
-if [ -f "$APP_DIR/schema.sql" ] && command -v sudo >/dev/null 2>&1; then
-  echo "[$(date -u '+%F %T UTC')] applying schema.sql" >> "$LOG"
-  sudo -u postgres psql -v ON_ERROR_STOP=1 -d panelbot -f "$APP_DIR/schema.sql" >> "$LOG" 2>&1
-fi
+# Apply schema changes that came with the new code.
+apply_schema || true
 
 "$PM2" restart "$APP_NAME" --update-env >> "$LOG" 2>&1
 sleep 8

@@ -65,6 +65,8 @@ export async function createPayment(accountId: number, tgId: number, kind: "topu
       .insert({ tenant_id: 0, account_id: accountId, tg_id: tgId, kind, amount, status: "pending" })
       .select("*").single();
     if (!error && data) return data as CryptoPayment;
+    console.error("createPayment insert failed", error);
+    if (error && !String(error.code ?? "").startsWith("23")) break; // not a duplicate -> retrying won't help
   }
   return null;
 }
