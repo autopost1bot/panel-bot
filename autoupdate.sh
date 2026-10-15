@@ -35,6 +35,13 @@ if ! git diff -q "$LOCAL" "$REMOTE" -- package.json package-lock.json >/dev/null
   npm install --silent >> "$LOG" 2>&1
 fi
 
+# Apply schema changes that came with the new code (every statement is
+# idempotent, so re-running it on an up-to-date database changes nothing).
+if [ -f "$APP_DIR/schema.sql" ] && command -v sudo >/dev/null 2>&1; then
+  echo "[$(date -u '+%F %T UTC')] applying schema.sql" >> "$LOG"
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -d panelbot -f "$APP_DIR/schema.sql" >> "$LOG" 2>&1
+fi
+
 "$PM2" restart "$APP_NAME" --update-env >> "$LOG" 2>&1
 sleep 8
 
