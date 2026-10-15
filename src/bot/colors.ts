@@ -30,6 +30,7 @@ export const COLOR_BUTTONS = [
   { id: "emoji", label: "Premium emoji", actions: ["a:emoji"] },
   { id: "colors", label: "Button colors", actions: ["a:colors"] },
   { id: "tenants", label: "Reseller bots", actions: ["a:tb", "a:tb:"] },
+  { id: "users", label: "Logged-in users", actions: ["a:users:"] },
   { id: "accounts", label: "Manage accounts", actions: ["a:accs", "a:m:"] },
   { id: "topup", label: "Top up", actions: ["a:mt:"] },
   { id: "deduct", label: "Deduct", actions: ["a:md:"] },
