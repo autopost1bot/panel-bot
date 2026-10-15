@@ -12,7 +12,7 @@ import {
 
 import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, titlePrefix, type EmojiTheme } from "./emoji";
 import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "./colors";
-import { checkPayment, createPayment, getWallet, type CryptoPayment } from "./crypto";
+import { availableNetworks, checkPayment, createPayment, getWallet, isTronAddress, NETWORK_CHAIN, NETWORK_LABEL, type CryptoPayment, type Network } from "./crypto";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
 const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Manage", stock: "📦 Stock", stats: "📊 Statistics" };
@@ -53,7 +53,7 @@ type Step =
   | { s: "broadcast" } | { s: "welcome" }
   | { s: "topup"; cid: number } | { s: "deduct"; cid: number }
   | { s: "buy_qty"; pid: number } | { s: "cprice"; cid: number; pid: number }
-  | { s: "pay_amount" }
+  | { s: "pay_amount"; net?: Network }
   | { s: "await_token" }
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
@@ -601,6 +601,13 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(`✅ BEP20 USDT wallet saved:\n<code>${escapeHtml(addr)}</code>\n\nCrypto payments are now live. Incoming transfers are checked automatically every minute.`);
       return;
     }
+    if (cmd === "settrc20") {
+      const addr = String(args[0] ?? "").trim();
+      if (!isTronAddress(addr)) { await reply("Usage: /settrc20 T... (your TRC20 USDT address)"); return; }
+      await setSetting(bot, "trc20_address", addr);
+      await reply(`✅ TRC20 USDT wallet saved:\n<code>${escapeHtml(addr)}</code>\n\nTRC20 payments are now live. Incoming transfers are checked automatically every minute.`);
+      return;
+    }
   }
 
   const step = ctx.session.step;
@@ -670,7 +677,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (!bot.isMain || !ctx.session.accountId) { ctx.session.step = null; return; }
       if (!(num > 0 && num <= 100000)) { await reply("❌ Send an amount between 1 and 100000 (e.g. 50)."); return; }
       ctx.session.step = null;
-      return startCryptoPayment(ctx, reply, "topup", num);
+      return startCryptoPayment(ctx, reply, "topup", num, step.net ?? "bep20");
     }
 
     // ── Admin steps
@@ -1473,9 +1480,9 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   const price = await getPrice(ctx.bot);
   const days = await getDays(ctx.bot);
   if (data === "tsub:no") { await reply("Cancelled."); return; }
-  if (data === "tsub:crypto") {
+  if (data === "tsub:crypto" || data === "tsub:crypto:bep20" || data === "tsub:crypto:trc20") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
-    return startCryptoPayment(ctx, reply, "sub", price);
+    return startCryptoPayment(ctx, reply, "sub", price, data.endsWith("trc20") ? "trc20" : "bep20");
   }
   if (data === "tsub:token") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
@@ -1485,8 +1492,10 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   }
   if (data === "tsub:buy") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    const nets = await availableNetworks();
+    const payRows = (nets.length ? nets : ["bep20"] as Network[]).map(n => [btn(`💳 Pay with USDT (${NETWORK_LABEL[n]})`, `tsub:crypto:${n}`)]);
     await reply(`Pay <b>${money(price)}</b> for ${days} days?`,
-      kb([btn(`✅ Pay from balance — ${money(price)}`, "tsub:pay")], [btn("💳 Pay with USDT (BEP20)", "tsub:crypto")], [btn("❌ Cancel", "tsub:no")]));
+      kb([btn(`✅ Pay from balance — ${money(price)}`, "tsub:pay")], ...payRows, [btn("❌ Cancel", "tsub:no")]));
     return;
   }
   if (data === "tsub:pay") {
@@ -1514,22 +1523,23 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
 
 // ─── Crypto payments (BEP20 USDT, main bot only) ─────────────────────────────
 
-async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "topup" | "sub", baseAmount: number) {
-  const wallet = await getWallet();
-  if (!wallet) { await reply("⚠️ Crypto payments are not available yet. Please ask the admin."); return; }
-  const p = await createPayment(ctx.session.accountId!, ctx.tgId, kind, baseAmount);
+async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "topup" | "sub", baseAmount: number, net: Network = "bep20") {
+  const wallet = await getWallet(net);
+  if (!wallet) { await reply(`⚠️ USDT (${NETWORK_LABEL[net]}) payments are not available yet. Please ask the admin.`); return; }
+  const p = await createPayment(ctx.session.accountId!, ctx.tgId, kind, baseAmount, net);
   if (!p) { await reply("⚠️ Could not create the payment. Please try again."); return; }
-  await reply(paymentText(p, wallet), kb(
+  await reply(paymentText(p, wallet, net), kb(
     [btn("✅ I've paid", `pay:check:${p.id}`)],
     [btn("❌ Cancel", `pay:cancel:${p.id}`)],
   ));
 }
 
-function paymentText(p: CryptoPayment, wallet: string): string {
-  return `💳 <b>Pay with USDT (BEP20)</b>\n\n` +
+function paymentText(p: CryptoPayment, wallet: string, net: Network = "bep20"): string {
+  const L = NETWORK_LABEL[net];
+  return `💳 <b>Pay with USDT (${L})</b>\n\n` +
     `Send <b>exactly</b> this amount:\n<code>${p.amount.toFixed(2)}</code> USDT\n\n` +
-    `To this address (BNB Smart Chain / BEP20):\n<code>${escapeHtml(wallet)}</code>\n\n` +
-    `⚠️ Send only <b>USDT on BEP20</b> — any other network or token is lost forever.\n` +
+    `To this address (${NETWORK_CHAIN[net]}):\n<code>${escapeHtml(wallet)}</code>\n\n` +
+    `⚠️ Send only <b>USDT on ${L}</b> — any other network or token is lost forever.\n` +
     `The exact amount (with the cents) identifies your payment.\n\n` +
     `✅ Your payment is verified automatically within a minute — no need to send any proof.`;
 }
@@ -1539,9 +1549,17 @@ async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, dat
   let m: RegExpMatchArray | null;
   if (data === "pay:top") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
-    const wallet = await getWallet();
-    if (!wallet) { await reply("⚠️ Crypto payments are not available yet. Please ask the admin."); return; }
-    return ask(ctx, reply, { s: "pay_amount" }, "💳 How much do you want to add? Send the amount in $ (e.g. 50):");
+    const nets = await availableNetworks();
+    if (!nets.length) { await reply("⚠️ Crypto payments are not available yet. Please ask the admin."); return; }
+    if (nets.length === 1) return ask(ctx, reply, { s: "pay_amount", net: nets[0] }, `💳 How much do you want to add via USDT (${NETWORK_LABEL[nets[0]]})? Send the amount in $ (e.g. 50):`);
+    await reply("💳 <b>Add balance</b>\n\nChoose the USDT network:", kb(...nets.map(n => [btn(`USDT (${NETWORK_LABEL[n]})`, `pay:top:${n}`)])));
+    return;
+  }
+  if ((m = data.match(/^pay:top:(bep20|trc20)$/))) {
+    if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    const net = m[1] as Network;
+    if (!(await getWallet(net))) { await reply("⚠️ This network is not available yet. Please ask the admin."); return; }
+    return ask(ctx, reply, { s: "pay_amount", net }, `💳 How much do you want to add via USDT (${NETWORK_LABEL[net]})? Send the amount in $ (e.g. 50):`);
   }
   if ((m = data.match(/^pay:cancel:(\d+)$/))) {
     await db.from("crypto_payments").update({ status: "cancelled" })
