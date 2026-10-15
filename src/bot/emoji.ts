@@ -15,7 +15,7 @@ export const EMOJI_LABELS: Record<string, string> = {
   "❌": "Reject / Error", "⚠️": "Warning", "⭐": "Featured", "📅": "Date / Expiry",
   "🟢": "Active status", "🔍": "Search", "🔓": "Access", "➖": "Deduct balance",
   "📄": "Details", "💲": "Pricing", "🎉": "Purchase completed", "🛠": "Admin tools",
-  "⛔️": "Subscription expired", "✉️": "Messages", "👥": "Manage accounts",
+  "⛔️": "Subscription expired", "✉️": "Messages", "👥": "Logged-in users / Accounts",
   "🏷": "Product label", "🔎": "Look at purchases", "📈": "Profit", "📉": "Expenses",
   "💳": "Payments", "💬": "Support", "💸": "Top up / Deduct", "🔄": "Refresh / Renew",
   "🔙": "Back", "📌": "Notice", "👉": "Continue", "➡️": "Next",
