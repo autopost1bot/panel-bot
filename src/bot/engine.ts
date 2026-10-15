@@ -12,6 +12,7 @@ import {
 
 import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, titlePrefix, type EmojiTheme } from "./emoji";
 import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "./colors";
+import { checkPayment, createPayment, getWallet, type CryptoPayment } from "./crypto";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
 const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Manage", stock: "📦 Stock", stats: "📊 Statistics" };
@@ -52,6 +53,7 @@ type Step =
   | { s: "broadcast" } | { s: "welcome" }
   | { s: "topup"; cid: number } | { s: "deduct"; cid: number }
   | { s: "buy_qty"; pid: number } | { s: "cprice"; cid: number; pid: number }
+  | { s: "pay_amount" }
   | { s: "await_token" }
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
@@ -452,8 +454,9 @@ const pr = (ctx: Ctx, p: any) => ctx.hide ? "$" : money(ctx.prices.get(Number(p.
 async function shopMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
   const acc = await getAccount(ctx);
   const welcome = renderWelcome((await getSetting(ctx.bot, "welcome")) ?? DEFAULT_WELCOME, acc?.username ?? ctx.session.username);
-  await reply(`${welcome}\n\n💰 Balance: <b>${money(acc?.balance ?? 0)}</b>`, kb(
-    [btn("🔑 Buy keys", "c:shop")], [btn("👤 Account", "c:me"), btn("🧾 My orders", "c:orders")]));
+  const rows: any[][] = [[btn("🔑 Buy keys", "c:shop")], [btn("👤 Account", "c:me"), btn("🧾 My orders", "c:orders")]];
+  if (ctx.bot.isMain) rows.push([btn("💳 Add balance (USDT)", "pay:top")]);
+  await reply(`${welcome}\n\n💰 Balance: <b>${money(acc?.balance ?? 0)}</b>`, kb(...rows));
 }
 
 async function ask(ctx: Ctx, reply: (h: string, e?: any) => any, step: Step, text: string, extra?: any) {
@@ -591,6 +594,13 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(`✅ Monthly bot price is now ${money(v)}.`);
       return;
     }
+    if (cmd === "setwallet") {
+      const addr = String(args[0] ?? "").trim();
+      if (!/^0x[0-9a-fA-F]{40}$/.test(addr)) { await reply("Usage: /setwallet 0x... (your BEP20 USDT address)"); return; }
+      await setSetting(bot, "bep20_address", addr);
+      await reply(`✅ BEP20 USDT wallet saved:\n<code>${escapeHtml(addr)}</code>\n\nCrypto payments are now live. Incoming transfers are checked automatically every minute.`);
+      return;
+    }
   }
 
   const step = ctx.session.step;
@@ -653,6 +663,14 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (!(Number.isInteger(num) && num >= 1 && num <= 100)) { await reply("❌ Send a number from 1 to 100."); return; }
       ctx.session.step = null;
       return buy(ctx, reply, step.pid, num);
+    }
+
+    // ── Crypto top-up amount
+    case "pay_amount": {
+      if (!bot.isMain || !ctx.session.accountId) { ctx.session.step = null; return; }
+      if (!(num > 0 && num <= 100000)) { await reply("❌ Send an amount between 1 and 100000 (e.g. 50)."); return; }
+      ctx.session.step = null;
+      return startCryptoPayment(ctx, reply, "topup", num);
     }
 
     // ── Admin steps
@@ -952,6 +970,8 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   }
   // ── My Own Bot (main bot only)
   if (bot.isMain && data.startsWith("tsub:")) return handleSubscription(ctx, reply, data);
+  // ── Crypto top-up (main bot only)
+  if (bot.isMain && data.startsWith("pay:")) return handleCryptoPay(ctx, reply, data);
 
   // ── Admin callbacks
   if (data === "a:add" && own) {
@@ -1453,6 +1473,10 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   const price = await getPrice(ctx.bot);
   const days = await getDays(ctx.bot);
   if (data === "tsub:no") { await reply("Cancelled."); return; }
+  if (data === "tsub:crypto") {
+    if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    return startCryptoPayment(ctx, reply, "sub", price);
+  }
   if (data === "tsub:token") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
     ctx.session.step = { s: "await_token" };
@@ -1461,8 +1485,8 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   }
   if (data === "tsub:buy") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
-    await reply(`Pay <b>${money(price)}</b> from your balance for ${days} days?`,
-      kb([btn("✅ Confirm payment", "tsub:pay"), btn("❌ Cancel", "tsub:no")]));
+    await reply(`Pay <b>${money(price)}</b> for ${days} days?`,
+      kb([btn(`✅ Pay from balance — ${money(price)}`, "tsub:pay")], [btn("💳 Pay with USDT (BEP20)", "tsub:crypto")], [btn("❌ Cancel", "tsub:no")]));
     return;
   }
   if (data === "tsub:pay") {
@@ -1484,6 +1508,55 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
     for (const adminId of ctx.bot.adminTgIds) {
       await sendHtml(ctx.bot.token, adminId, `💰 Bot subscription: <b>${escapeHtml(ctx.session.username ?? String(ctx.session.accountId))}</b> paid ${money(price)} (tenant #${t.id}).`).catch(() => {});
     }
+    return;
+  }
+}
+
+// ─── Crypto payments (BEP20 USDT, main bot only) ─────────────────────────────
+
+async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "topup" | "sub", baseAmount: number) {
+  const wallet = await getWallet();
+  if (!wallet) { await reply("⚠️ Crypto payments are not available yet. Please ask the admin."); return; }
+  const p = await createPayment(ctx.session.accountId!, ctx.tgId, kind, baseAmount);
+  if (!p) { await reply("⚠️ Could not create the payment. Please try again."); return; }
+  await reply(paymentText(p, wallet), kb(
+    [btn("✅ I've paid", `pay:check:${p.id}`)],
+    [btn("❌ Cancel", `pay:cancel:${p.id}`)],
+  ));
+}
+
+function paymentText(p: CryptoPayment, wallet: string): string {
+  return `💳 <b>Pay with USDT (BEP20)</b>\n\n` +
+    `Send <b>exactly</b> this amount:\n<code>${p.amount.toFixed(2)}</code> USDT\n\n` +
+    `To this address (BNB Smart Chain / BEP20):\n<code>${escapeHtml(wallet)}</code>\n\n` +
+    `⚠️ Send only <b>USDT on BEP20</b> — any other network or token is lost forever.\n` +
+    `The exact amount (with the cents) identifies your payment.\n\n` +
+    `✅ Your payment is verified automatically within a minute — no need to send any proof.`;
+}
+
+async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
+  const db = await getDb();
+  let m: RegExpMatchArray | null;
+  if (data === "pay:top") {
+    if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    const wallet = await getWallet();
+    if (!wallet) { await reply("⚠️ Crypto payments are not available yet. Please ask the admin."); return; }
+    return ask(ctx, reply, { s: "pay_amount" }, "💳 How much do you want to add? Send the amount in $ (e.g. 50):");
+  }
+  if ((m = data.match(/^pay:cancel:(\d+)$/))) {
+    await db.from("crypto_payments").update({ status: "cancelled" })
+      .eq("id", Number(m[1])).eq("account_id", ctx.session.accountId ?? -1).eq("status", "pending");
+    await reply("❌ Payment cancelled.");
+    return;
+  }
+  if ((m = data.match(/^pay:check:(\d+)$/))) {
+    const id = Number(m[1]);
+    const { data: p } = await db.from("crypto_payments").select("account_id").eq("id", id).maybeSingle();
+    if (!p || p.account_id !== ctx.session.accountId) { await reply("❌ Payment not found."); return; }
+    const status = await checkPayment(id);
+    if (status === "paid") await reply("✅ Payment confirmed! Check your balance / subscription.");
+    else if (status === "pending") await reply("⏳ Not received yet. If you just sent it, wait a minute and tap \"✅ I've paid\" again — it is also checked automatically.");
+    else await reply("⌛ This payment has expired. Please start a new one.");
     return;
   }
 }
