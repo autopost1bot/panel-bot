@@ -275,14 +275,31 @@ async function historyPage(ctx: Ctx, reply: (h: string, e?: any) => any, request
   await replyLines(reply, lines, kb(...rows));
 }
 
+// Short in-memory cache: settings are read on every update but change rarely.
+// All writes go through setSetting (same process), which refreshes the cache.
+const settingCache = new Map<string, { at: number; value: string | null }>();
+const SETTING_TTL = 60_000;
+export function clearSettingCache() { settingCache.clear(); }
 async function getSetting(bot: BotInfo, key: string): Promise<string | null> {
+  const ck = `${bot.tenantId}:${key}`;
+  const hit = settingCache.get(ck);
+  if (hit && Date.now() - hit.at < SETTING_TTL) return hit.value;
   const db = await getDb();
   const { data } = await db.from("bot_settings").select("value").eq("tenant_id", bot.tenantId).eq("key", key).maybeSingle();
-  return data?.value ?? null;
+  const value = data?.value ?? null;
+  settingCache.set(ck, { at: Date.now(), value });
+  return value;
 }
 async function setSetting(bot: BotInfo, key: string, value: string) {
   const db = await getDb();
+  settingCache.delete(`${bot.tenantId}:${key}`);
   await db.from("bot_settings").upsert({ tenant_id: bot.tenantId, key, value });
+  settingCache.set(`${bot.tenantId}:${key}`, { at: Date.now(), value });
+}
+/** Remember who logged in and when (admin "Logged-in users" list). Never blocks the reply. */
+function recordLogin(ctx: Ctx, accountId: number) {
+  void getDb().then((db: any) => db.from("bot_accounts").update({ tg_id: ctx.tgId, last_login_at: new Date().toISOString(), tg_name: ctx.firstName || null, tg_username: ctx.tgUsername || null }).eq("id", accountId))
+    .then((r: any) => { if (r?.error) console.error("record login failed", r.error.message); }, () => {});
 }
 /** Telegram IDs rejected by the admin — they cannot request access again. */
 async function blockedUsers(bot: BotInfo): Promise<number[]> {
@@ -399,7 +416,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("👤 Add account", "a:acc"), btn("💰 Add balance", "a:bal")],
     [btn("📊 Orders & profit", "a:stats"), btn("📣 Broadcast", "a:bc")],
     [btn("👋 Welcome text", "a:wel"), btn(hidden ? "👁 Show prices" : "🙈 Hide prices", "a:hide")],
-    [btn("💬 Support username", "a:sup")],
+    [btn("💬 Support username", "a:sup"), btn("👥 Logged-in users", "a:users:0")],
     [btn("✨ Premium emoji", "a:emoji"), btn("🎨 Button colors", "a:colors")],
     ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb")]] : []),
   ));
@@ -549,6 +566,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         }
         if (!acc) { await reply("⚠️ Something went wrong. Please send /start again."); return; }
         ctx.session.accountId = acc.id; ctx.session.username = acc.username;
+        recordLogin(ctx, acc.id);
         await startWelcome(ctx, reply);
         return;
       }
@@ -685,6 +703,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (ctx.chatId && update_message_id(ctx)) await tgCall(bot.token, "deleteMessage", { chat_id: ctx.chatId, message_id: update_message_id(ctx) }).catch(() => {});
       if (!acc) { await reply("❌ Wrong password. Try again, or /cancel."); return; }
       await db.from("bot_accounts").update({ tg_id: tgId }).eq("id", acc.id);
+      recordLogin(ctx, acc.id);
       ctx.session.accountId = acc.id;
       ctx.session.username = acc.username;
       ctx.session.step = null;
@@ -1124,6 +1143,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return;
   }
   if (data === "a:accs" && own) return manageList(ctx, reply);
+  if ((m = data.match(/^a:users:(\d+)$/)) && own) return usersPage(ctx, reply, Number(m[1]));
   if ((m = data.match(/^a:purch(?::(\d+))?$/)) && own) {
     return historyPage(ctx, reply, Number(m[1] ?? 0), "a:purch");
   }
@@ -1410,6 +1430,65 @@ async function stockView(ctx: Ctx, reply: (h: string, e?: any) => any) {
     }
   }
   await reply(out, kb([btn("⬅️ Back", "a:home")]));
+}
+
+const USERS_PER_PAGE = 10;
+function fmtDay(v: any): string {
+  if (!v) return "—";
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? "—" : d.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
+}
+/** Admin: every logged-in user (10 per page) with login date and bot subscription details. */
+async function usersPage(ctx: Ctx, reply: (h: string, e?: any) => any, requested: number) {
+  const db = await getDb();
+  const tid = ctx.bot.tenantId;
+  const { count } = await db.from("bot_accounts").select("id", { count: "exact", head: true }).eq("tenant_id", tid).not("tg_id", "is", null);
+  const total = Number(count ?? 0);
+  const pages = Math.max(1, Math.ceil(total / USERS_PER_PAGE));
+  const page = Math.max(0, Math.min(requested, pages - 1));
+  const back = [btn("⬅️ Go back", "a:home")];
+  if (!total) { await reply("👥 <b>Logged-in users</b>\n\nNo users have logged in yet.", kb(back)); return; }
+  const { data: rows } = await db.from("bot_accounts").select("*").eq("tenant_id", tid).not("tg_id", "is", null)
+    .order("last_login_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false })
+    .range(page * USERS_PER_PAGE, page * USERS_PER_PAGE + USERS_PER_PAGE - 1);
+  const ids = (rows ?? []).map((r: any) => r.id);
+  // Bot subscriptions only exist in the main bot (resellers buy them there).
+  const subs = new Map<number, any>();
+  const paid = new Map<number, string>();
+  if (ctx.bot.isMain && ids.length) {
+    const { data: tb } = await db.from("tenant_bots").select("id, owner_account_id, bot_username, expires_at, status, created_at").in("owner_account_id", ids);
+    for (const t of tb ?? []) subs.set(Number(t.owner_account_id), t);
+    const tids = (tb ?? []).map((t: any) => t.id);
+    if (tids.length) {
+      const { data: pays } = await db.from("tenant_bot_payments").select("tenant_id, created_at").in("tenant_id", tids).order("created_at", { ascending: false });
+      for (const p of pays ?? []) if (!paid.has(Number(p.tenant_id))) paid.set(Number(p.tenant_id), p.created_at);
+    }
+  }
+  const now = Date.now();
+  const blocks = (rows ?? []).map((u: any, i: number) => {
+    const n = page * USERS_PER_PAGE + i + 1;
+    const lines = [
+      `<b>${n}.</b> 👤 <b>${escapeHtml(u.username)}</b>`,
+      `   🏷 Name: ${escapeHtml(u.tg_name || "—")}${u.tg_username ? ` (@${escapeHtml(u.tg_username)})` : ""}`,
+      `   🔐 Login: ${fmtDay(u.last_login_at ?? u.created_at)}`,
+    ];
+    const t = subs.get(Number(u.id));
+    if (t) {
+      const exp = new Date(t.expires_at).getTime();
+      const left = Math.ceil((exp - now) / 86400000);
+      const state = t.status === "disabled" ? "🔴 Disabled" : exp <= now || t.status === "expired" ? "⛔️ Expired" : `🟢 Active · ${left} day${left === 1 ? "" : "s"} left`;
+      lines.push(`   🤖 Subscription: ${t.bot_username ? `@${escapeHtml(t.bot_username)} · ` : ""}${state}`);
+      lines.push(`   📅 Bought: ${fmtDay(paid.get(Number(t.id)) ?? t.created_at)} · Expires: ${fmtDay(t.expires_at)}`);
+    } else if (ctx.bot.isMain) {
+      lines.push("   🤖 Subscription: —");
+    }
+    return lines.join("\n");
+  });
+  const nav: any[] = [];
+  if (page > 0) nav.push(btn("⬅️ Previous", `a:users:${page - 1}`));
+  if (page + 1 < pages) nav.push(btn("Next ➡️", `a:users:${page + 1}`));
+  await reply(`👥 <b>Logged-in users</b> · ${total}\n📄 Page ${page + 1}/${pages}\n\n${blocks.join("\n\n")}`,
+    kb(...(nav.length ? [nav] : []), back));
 }
 
 async function manageList(ctx: Ctx, reply: (h: string, e?: any) => any) {
