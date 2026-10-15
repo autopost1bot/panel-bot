@@ -23,9 +23,11 @@ const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man:
 // user is greeted personally without any admin setup.
 const DEFAULT_WELCOME =
   "👋 <b>Welcome, {name}!</b>\n\n" +
-  "🛒 Your trusted store for digital game keys.\n" +
-  "🔑 Buy keys instantly — fast, automatic delivery.\n" +
-  "💰 Track your balance and order history anytime.";
+  "🤖 <b>Create your own Telegram shop bot</b> — no coding needed.\n" +
+  "🛒 Sell keys and digital products with automatic delivery.\n" +
+  "👥 Manage customers, orders and resellers from one panel.\n" +
+  "💳 Accept USDT payments — verified automatically.\n\n" +
+  "Tap <b>🤖 My Own Bot</b> below to get started.";
 
 // Short greeting a reseller bot shows before sign-in. The login prompt follows it,
 // so the very first screen stays clean until the customer has logged in.
@@ -149,6 +151,12 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
     if (session.accountId) {
       for (const r of ((cpRes as any)?.data ?? []).filter((x: any) => Number(x.account_id) === Number(session.accountId))) ctx.prices.set(Number((r as any).product_id), Number((r as any).price));
     }
+  }
+  // Refresh name/username/login date once per session for already logged-in users
+  // (older accounts were saved before these fields existed).
+  if (session.accountId && !(session as any).loginRecorded) {
+    (session as any).loginRecorded = true;
+    recordLogin(ctx, Number(session.accountId));
   }
 
   // Button taps edit the tapped message in place (no new message per step);
