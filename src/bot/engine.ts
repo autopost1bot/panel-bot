@@ -451,12 +451,41 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     } else if (ctx.session.accountId) {
       await reply((await getSetting(bot, "welcome")) ?? "👋 <b>Welcome!</b>", menuKb(ctx));
     } else {
-      // New visitor: admin must approve before they can log in.
       const blocked = await blockedUsers(bot);
       if (blocked.includes(tgId)) {
         await reply("🚫 Access denied.");
         return;
       }
+      // Main bot: open access — no username/password. Reuse or auto-create the account by Telegram ID.
+      if (bot.isMain) {
+        let { data: acc } = await db.from("bot_accounts").select("id,username").eq("tenant_id", bot.tenantId).eq("tg_id", tgId).order("id").limit(1).maybeSingle();
+        if (!acc) {
+          const base = (ctx.tgUsername || `user${String(tgId).slice(-6)}`).toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 24) || `user${tgId}`;
+          let uname = base;
+          for (let i = 1; ; i++) {
+            const { data: exists } = await db.from("bot_accounts").select("id").eq("tenant_id", bot.tenantId).eq("username", uname).maybeSingle();
+            if (!exists) break;
+            uname = `${base}${i}`;
+          }
+          const pass = Array.from(crypto.getRandomValues(new Uint8Array(16))).map(b => b.toString(16)).join("");
+          const hash = await hashPassword(bot.tenantId, uname, pass);
+          const { data: created } = await db.from("bot_accounts").insert({ tenant_id: bot.tenantId, username: uname, password_hash: hash, tg_id: tgId, balance: 0 }).select("id,username").single();
+          acc = created;
+          if (acc) {
+            const notice =
+              `🆕 <b>New user started the bot</b>\n\n` +
+              `👤 Name: ${escapeHtml(ctx.firstName || "—")}\n` +
+              `Username: ${ctx.tgUsername ? `@${escapeHtml(ctx.tgUsername)}` : "—"}\n` +
+              `ID: <code>${tgId}</code>`;
+            for (const adminId of bot.adminTgIds) await sendHtml(bot.token, adminId, notice).catch(() => {});
+          }
+        }
+        if (!acc) { await reply("⚠️ Something went wrong. Please send /start again."); return; }
+        ctx.session.accountId = acc.id; ctx.session.username = acc.username;
+        await reply((await getSetting(bot, "welcome")) ?? "👋 <b>Welcome!</b>", menuKb(ctx));
+        return;
+      }
+      // Reseller bots: the owner must approve; the bot then generates username + password.
       if (!ctx.session.approvalSent) {
         ctx.session.approvalSent = true;
         const admins = bot.isMain ? bot.adminTgIds : [bot.ownerTgId];
