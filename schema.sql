@@ -80,3 +80,18 @@ $function$;
 
 REVOKE EXECUTE ON FUNCTION public.buy_keys(integer, integer, integer, integer) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.buy_subscription(integer, bigint, double precision, integer) FROM PUBLIC, anon, authenticated;
+
+-- BEP20 USDT payments (main bot). fulfill_crypto_payment is applied via the
+-- Lovable Cloud migration; keep this in sync for fresh installs.
+CREATE TABLE IF NOT EXISTS public.crypto_payments (
+  id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+  tenant_id integer NOT NULL DEFAULT 0,
+  account_id integer NOT NULL REFERENCES public.bot_accounts(id),
+  tg_id bigint NOT NULL,
+  kind text NOT NULL DEFAULT 'topup',
+  amount double precision NOT NULL,
+  status text NOT NULL DEFAULT 'pending',
+  tx_hash text UNIQUE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  paid_at timestamptz
+);
