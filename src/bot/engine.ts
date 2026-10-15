@@ -1139,30 +1139,19 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     await replyLines(reply, lines, kb(...ps.map((p) => [btn(`🔑 Keys: ${plainLabel(p.name)}`, `a:tbk:${tid}:${p.id}`)]), [btn("⬅️ Reseller bots", "a:tb")]));
     return;
   }
+  if ((m = data.match(/^a:vk:(\d+)$/)) && own) {
+    const pid = Number(m[1]);
+    const p = await getProduct(db, bot.tenantId, pid);
+    if (!p) return;
+    const lines = await keysReport(db, bot.tenantId, p);
+    await replyLines(reply, lines, kb([btn("⬅️ Go back", `a:p:${pid}`)]));
+    return;
+  }
   if ((m = data.match(/^a:tbk:(\d+):(\d+)$/)) && own && bot.isMain) {
     const tid = Number(m[1]), pid = Number(m[2]);
     const p = await getProduct(db, tid, pid);
     if (!p) return;
-    const vars = Number(p.nvars) ? await variantsOf(db, tid, pid) : [p];
-    const lines = [`🔑 <b>Keys — ${p.name}</b>`];
-    for (const v of vars) {
-      const { data: ks } = await db.from("product_keys").select("key, sold").eq("product_id", Number(v.id)).order("id").limit(200);
-      const soldKeys = (ks ?? []).filter((k: any) => k.sold).map((k: any) => k.key);
-      const buyers = new Map<string, { user: string; date: string; price: string }>();
-      if (soldKeys.length) {
-        const { data: os } = await db.from("shop_orders").select("key, account_id, created_at, price").eq("tenant_id", tid).eq("product_id", Number(v.id)).in("key", soldKeys).limit(200);
-        const accIds = [...new Set((os ?? []).map((o: any) => Number(o.account_id)))];
-        const { data: accs } = accIds.length ? await db.from("bot_accounts").select("id, username").in("id", accIds) : { data: [] };
-        const names = new Map((accs ?? []).map((a: any) => [Number(a.id), a.username as string]));
-        for (const o of os ?? []) if (o.key) buyers.set(o.key, { user: names.get(Number(o.account_id)) ?? `#${o.account_id}`, date: fmtDate(o.created_at), price: money(o.price ?? v.price) });
-      }
-      lines.push("", `⏱ <b>${v.id === p.id ? "Keys" : v.name}</b> (${(ks ?? []).filter((k: any) => !k.sold).length} unsold / ${(ks ?? []).length})`);
-      if (!ks?.length) lines.push("No keys.");
-      for (const k of ks ?? []) {
-        const b = buyers.get(k.key);
-        lines.push(k.sold ? `✅ sold <code>${escapeHtml(k.key)}</code>` + (b ? ` — 💵 ${b.price} · 👤 ${escapeHtml(b.user)} · 📅 ${b.date}` : "") : `🟢 <code>${escapeHtml(k.key)}</code>`);
-      }
-    }
+    const lines = await keysReport(db, tid, p);
     await replyLines(reply, lines, kb([btn("⬅️ Back", `a:tb:${tid}`)]));
     return;
   }
@@ -1231,6 +1220,31 @@ async function variantPrompt(ctx: Ctx, reply: (h: string, e?: any) => any, pid: 
   return ask(ctx, reply, { s: "add_vars", pid }, "⏱ Enter the duration (e.g. 1 Day, 7 Days):");
 }
 
+async function keysReport(db: any, tid: number, p: any): Promise<string[]> {
+  const pid = Number(p.id);
+  const vars = Number(p.nvars) ? await variantsOf(db, tid, pid) : [p];
+  const lines = [`🔑 <b>Keys — ${p.name}</b>`];
+  for (const v of vars) {
+    const { data: ks } = await db.from("product_keys").select("key, sold").eq("product_id", Number(v.id)).order("id").limit(200);
+    const soldKeys = (ks ?? []).filter((k: any) => k.sold).map((k: any) => k.key);
+    const buyers = new Map<string, { user: string; date: string; price: string }>();
+    if (soldKeys.length) {
+      const { data: os } = await db.from("shop_orders").select("key, account_id, created_at, price").eq("tenant_id", tid).eq("product_id", Number(v.id)).in("key", soldKeys).limit(200);
+      const accIds = [...new Set((os ?? []).map((o: any) => Number(o.account_id)))];
+      const { data: accs } = accIds.length ? await db.from("bot_accounts").select("id, username").in("id", accIds) : { data: [] };
+      const names = new Map((accs ?? []).map((a: any) => [Number(a.id), a.username as string]));
+      for (const o of os ?? []) if (o.key) buyers.set(o.key, { user: names.get(Number(o.account_id)) ?? `#${o.account_id}`, date: fmtDate(o.created_at), price: money(o.price ?? v.price) });
+    }
+    lines.push("", `⏱ <b>${v.id === p.id ? "Keys" : v.name}</b> (${(ks ?? []).filter((k: any) => !k.sold).length} unsold / ${(ks ?? []).length})`);
+    if (!ks?.length) lines.push("No keys.");
+    for (const k of ks ?? []) {
+      const b = buyers.get(k.key);
+      lines.push(k.sold ? `✅ sold <code>${escapeHtml(k.key)}</code>` + (b ? ` — 💵 ${b.price} · 👤 ${escapeHtml(b.user)} · 📅 ${b.date}` : "") : `🟢 <code>${escapeHtml(k.key)}</code>`);
+    }
+  }
+  return lines;
+}
+
 async function adminProduct(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number) {
   ctx.session.step = null;
   const db = await getDb();
@@ -1240,6 +1254,7 @@ async function adminProduct(ctx: Ctx, reply: (h: string, e?: any) => any, pid: n
     const parent = await getProduct(db, ctx.bot.tenantId, Number(p.parent_id));
     await reply(`${parent?.name ?? ""} — <b>${p.name}</b>\n\n💵 Price: <b>${money(p.price)}</b>\n📦 Stock: ${p.stock}`, kb(
       [btn("🔑 Add keys", `a:k:${pid}`), btn("💵 Price", `a:sp:${pid}`)],
+      [btn("🗂 View keys", `a:vk:${pid}`)],
       [btn("✏️ Name", `a:sn:${pid}`), btn("🗑 Delete", `a:del:${pid}`)], [btn("⬅️ Go back", `c:p:${p.parent_id}`)]));
     return;
   }
@@ -1250,12 +1265,14 @@ async function adminProduct(ctx: Ctx, reply: (h: string, e?: any) => any, pid: n
     await reply(head + `\n⏱ ${vars.length} variant(s) · 📦 total stock ${p.stock}\nTap a variant to add keys / change price:`, kb(
       ...vars.map((v) => [btn(`${v.name} · ${money(v.price)} · stock ${v.stock}`, `a:p:${v.id}`)]),
       [btn("➕ Add variants", `a:v:${pid}`), btn("📂 Category", `a:pc:${pid}`)],
+      [btn("🗂 View keys", `a:vk:${pid}`)],
       [btn("✏️ Name", `a:sn:${pid}`), btn("📝 Description", `a:sd:${pid}`)],
       [btn("🗑 Delete product", `a:del:${pid}`), btn("⬅️ Products", "a:list")]));
   } else {
     await reply(head + `\n💵 Price: <b>${money(p.price)}</b>\n📦 Stock: ${p.stock}\n\nNo variants yet — add 1 Day / 7 Days / 30 Days… with ➕ Add variants.`, kb(
       [btn("➕ Add variants", `a:v:${pid}`)],
       [btn("🔑 Add keys", `a:k:${pid}`), btn("💵 Price", `a:sp:${pid}`)],
+      [btn("🗂 View keys", `a:vk:${pid}`)],
       [btn("✏️ Name", `a:sn:${pid}`), btn("📝 Description", `a:sd:${pid}`), btn("📂 Category", `a:pc:${pid}`)],
       [btn("🗑 Delete product", `a:del:${pid}`), btn("⬅️ Products", "a:list")]));
   }
