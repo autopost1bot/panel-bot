@@ -421,7 +421,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("➕ Add product", "a:add"), btn("📦 Products", "a:list")],
     [btn("📂 Categories", "a:cats"), btn("📦 Stock", "a:stock")],
     [btn("🔧 Manage", "a:manage"), btn("🛍 View shop", "c:shop")],
-    [btn("👤 Add account", "a:acc"), btn("💰 Add balance", "a:bal")],
+    ctx.bot.isMain ? [btn("💰 Add balance", "a:bal")] : [btn("👤 Add account", "a:acc"), btn("💰 Add balance", "a:bal")],
     [btn("📊 Orders & profit", "a:stats"), btn("📣 Broadcast", "a:bc")],
     [btn("👋 Welcome text", "a:wel"), btn(hidden ? "👁 Show prices" : "🙈 Hide prices", "a:hide")],
     [btn("💬 Support username", "a:sup"), btn("👥 Logged-in users", "a:users:0")],
@@ -1142,7 +1142,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   }
 
   if (data === "a:acc" && own) return ask(ctx, reply, { s: "acc_user" }, "👤 Choose a <b>username</b> for the new account:\n\n3–32 characters — letters, numbers, <code>_</code> or <code>.</code>");
-  if (data === "a:bal" && own) return ask(ctx, reply, { s: "bal_add" }, "💰 Send: <code>USERNAME AMOUNT</code>\nUse a negative amount to deduct.");
+  if ((m = data.match(/^a:bal(?::(\d+))?$/)) && own) return balPicker(ctx, reply, Number(m[1] ?? 0));
   if (data === "a:manage" && own) {
     await reply("🔧 Choose action", kb(
       [btn("🔓 Manage accounts", "a:accs")],
@@ -1499,14 +1499,31 @@ async function usersPage(ctx: Ctx, reply: (h: string, e?: any) => any, requested
     kb(...(nav.length ? [nav] : []), back));
 }
 
+async function balPicker(ctx: Ctx, reply: (h: string, e?: any) => any, page: number) {
+  const db = await getDb();
+  const per = 10;
+  const { data: cs, count } = await db.from("bot_accounts").select("id, username, balance", { count: "exact" })
+    .eq("tenant_id", ctx.bot.tenantId).order("id", { ascending: false }).range(page * per, page * per + per - 1);
+  const total = count ?? cs?.length ?? 0;
+  const back = [btn("⬅️ Go back", "a:home")];
+  if (!cs?.length) { await reply("👥 No users yet.", kb(back)); return; }
+  const pages = Math.max(1, Math.ceil(total / per));
+  const rows = cs.map((c: any) => [btn(`${plainLabel(c.username)} · ${money(c.balance)}`, `a:mt:${c.id}`)]);
+  const nav: any[] = [];
+  if (page > 0) nav.push(btn("⬅️ Previous", `a:bal:${page - 1}`));
+  if (page + 1 < pages) nav.push(btn("Next ➡️", `a:bal:${page + 1}`));
+  await reply(`💰 <b>Add balance</b> · ${total} users\n📄 Page ${page + 1}/${pages}\n\nTap a user to top up:`,
+    { ...kb(...rows, ...(nav.length ? [nav] : []), back), noButtonColors: true });
+}
+
 async function manageList(ctx: Ctx, reply: (h: string, e?: any) => any) {
   const db = await getDb();
   const { data: cs } = await db.from("bot_accounts").select("*").eq("tenant_id", ctx.bot.tenantId).order("balance", { ascending: false }).limit(40);
-  if (!cs?.length) { await reply("👥 No accounts yet.", kb([btn("👤 Add account", "a:acc")], [btn("⬅️ Back", "a:home")])); return; }
+  if (!cs?.length) { await reply("👥 No accounts yet.", kb(...(ctx.bot.isMain ? [] : [[btn("👤 Add account", "a:acc")]]), [btn("⬅️ Back", "a:home")])); return; }
   const rows: any[][] = [];
   for (let i = 0; i < cs.length; i += 2)
     rows.push(cs.slice(i, i + 2).map((c: any) => btn(`${plainLabel(c.username)} (${money(c.balance)})`, `a:m:${c.id}`)));
-  await reply("👤 <b>Choose account to manage:</b>", kb([btn("➕ Add account", "a:acc")], ...rows, [btn("⬅️ Go back", "a:manage")]));
+  await reply("👤 <b>Choose account to manage:</b>", kb(...(ctx.bot.isMain ? [] : [[btn("➕ Add account", "a:acc")]]), ...rows, [btn("⬅️ Go back", "a:manage")]));
 }
 
 async function ownerShop(ctx: Ctx, reply: (h: string, e?: any) => any) {
