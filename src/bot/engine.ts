@@ -1117,7 +1117,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     const { data: accs } = ids.length ? await db.from("bot_accounts").select("id, username").in("id", ids) : { data: [] };
     const nameOf = (id: number) => (accs ?? []).find((a: any) => a.id === id)?.username ?? "?";
     await reply(`🤖 <b>Reseller bots</b> (${(ts ?? []).length})`, kb(
-      ...(ts ?? []).map((t: any) => [btn(`${plainLabel(nameOf(t.owner_account_id))}${t.bot_username ? " · @" + t.bot_username : ""}`, `a:tb:${t.id}`)]),
+      ...(ts ?? []).map((t: any) => [btn(`${t.status === "active" ? "🟢" : "🔴"} ${plainLabel(nameOf(t.owner_account_id))}${t.bot_username ? " · @" + t.bot_username : ""}`, `a:tb:${t.id}`)]),
       [btn("⬅️ Back", "a:home")]));
     return;
   }
@@ -1138,7 +1138,22 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
         for (const v of vars) lines.push(`   · ${v.name} · ${money(v.price)} · stock ${v.stock}`);
       }
     }
-    await replyLines(reply, lines, kb(...ps.map((p) => [btn(`🔑 Keys: ${plainLabel(p.name)}`, `a:tbk:${tid}:${p.id}`)]), [btn("⬅️ Reseller bots", "a:tb")]));
+    await replyLines(reply, lines, kb(
+      ...ps.map((p) => [btn(`🔑 Keys: ${plainLabel(p.name)}`, `a:tbk:${tid}:${p.id}`)]),
+      [btn(t.status === "active" ? "⛔️ Turn off bot" : "✅ Turn on bot", `a:tbs:${tid}`)],
+      [btn("⬅️ Reseller bots", "a:tb")]));
+    return;
+  }
+  if ((m = data.match(/^a:tbs:(\d+)$/)) && own && bot.isMain) {
+    const tid = Number(m[1]);
+    const { data: t } = await db.from("tenant_bots").select("id, status, bot_username").eq("id", tid).maybeSingle();
+    if (!t) return;
+    const next = t.status === "active" ? "disabled" : "active";
+    await db.from("tenant_bots").update({ status: next }).eq("id", tid);
+    await reply(next === "disabled"
+      ? `⛔️ Bot ${t.bot_username ? "@" + escapeHtml(t.bot_username) : "#" + tid} is now <b>OFF</b>. It will not respond to anyone until you turn it back on.`
+      : `✅ Bot ${t.bot_username ? "@" + escapeHtml(t.bot_username) : "#" + tid} is now <b>ON</b>.`,
+      kb([btn("⬅️ Back", `a:tb:${tid}`)]));
     return;
   }
   if ((m = data.match(/^a:vk:(\d+)$/)) && own) {
