@@ -81,8 +81,7 @@ $function$;
 REVOKE EXECUTE ON FUNCTION public.buy_keys(integer, integer, integer, integer) FROM PUBLIC, anon, authenticated;
 REVOKE EXECUTE ON FUNCTION public.buy_subscription(integer, bigint, double precision, integer) FROM PUBLIC, anon, authenticated;
 
--- BEP20 USDT payments (main bot). fulfill_crypto_payment is applied via the
--- Lovable Cloud migration; keep this in sync for fresh installs.
+-- BEP20 USDT payments (main bot).
 CREATE TABLE IF NOT EXISTS public.crypto_payments (
   id integer PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
   tenant_id integer NOT NULL DEFAULT 0,
@@ -95,3 +94,48 @@ CREATE TABLE IF NOT EXISTS public.crypto_payments (
   created_at timestamptz NOT NULL DEFAULT now(),
   paid_at timestamptz
 );
+ALTER TABLE public.crypto_payments ENABLE ROW LEVEL SECURITY;
+
+-- Credits the payment: subscription -> activate/renew the bot, top-up -> balance.
+CREATE OR REPLACE FUNCTION public.fulfill_crypto_payment(p_id integer, p_tx text)
+ RETURNS jsonb
+ LANGUAGE plpgsql
+ SECURITY DEFINER
+ SET search_path TO 'public'
+AS $function$
+DECLARE
+  p record; cu record; t record; price double precision; days integer;
+BEGIN
+  SELECT * INTO p FROM crypto_payments WHERE id = p_id FOR UPDATE;
+  IF NOT FOUND THEN RETURN jsonb_build_object('err', 'not found'); END IF;
+  IF p.status <> 'pending' THEN RETURN jsonb_build_object('err', 'already ' || p.status); END IF;
+
+  UPDATE crypto_payments SET status = 'paid', tx_hash = p_tx, paid_at = now() WHERE id = p_id;
+
+  IF p.kind = 'sub' THEN
+    SELECT COALESCE(NULLIF(value, '')::double precision, 30) INTO price FROM bot_settings WHERE tenant_id = 0 AND key = 'bot_price';
+    SELECT COALESCE(NULLIF(value, '')::integer, 30) INTO days FROM bot_settings WHERE tenant_id = 0 AND key = 'bot_days';
+    price := COALESCE(price, 30); days := COALESCE(days, 30);
+    SELECT * INTO cu FROM bot_accounts WHERE id = p.account_id;
+    INSERT INTO tenant_bots (owner_account_id, owner_tg_id, expires_at, status)
+      VALUES (p.account_id, p.tg_id, now() + make_interval(days => days), 'active')
+    ON CONFLICT (owner_account_id) DO UPDATE SET
+      expires_at = GREATEST(tenant_bots.expires_at, now()) + make_interval(days => days),
+      status = 'active', reminded = 0, owner_tg_id = EXCLUDED.owner_tg_id
+    RETURNING * INTO t;
+    INSERT INTO tenant_bot_payments (tenant_id, amount, days, note) VALUES (t.id, p.amount, days, 'crypto-bep20');
+    RETURN jsonb_build_object('ok', true, 'kind', 'sub', 'amount', p.amount, 'expires_at', t.expires_at, 'balance', COALESCE(cu.balance, 0));
+  END IF;
+
+  UPDATE bot_accounts SET balance = balance + p.amount WHERE id = p.account_id RETURNING * INTO cu;
+  RETURN jsonb_build_object('ok', true, 'kind', 'topup', 'amount', p.amount, 'balance', cu.balance);
+END;
+$function$;
+
+-- New tables/functions above must stay reachable by the bot's database role.
+GRANT USAGE ON SCHEMA public TO service_role;
+GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;
+GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO service_role;
+GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO service_role;
+ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role;
