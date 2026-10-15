@@ -143,3 +143,19 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO service_role
 
 -- Make the database API see new tables/functions right away.
 NOTIFY pgrst, 'reload schema';
+
+-- Logged-in users list (admin) + speed indexes. Idempotent.
+ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS last_login_at timestamptz;
+ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS tg_name text;
+ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS tg_username text;
+CREATE INDEX IF NOT EXISTS bot_accounts_tenant_tg_idx ON bot_accounts (tenant_id, tg_id);
+CREATE INDEX IF NOT EXISTS bot_accounts_tenant_login_idx ON bot_accounts (tenant_id, last_login_at DESC);
+CREATE INDEX IF NOT EXISTS products_tenant_idx ON products (tenant_id, category_id);
+CREATE INDEX IF NOT EXISTS products_parent_idx ON products (parent_id);
+CREATE INDEX IF NOT EXISTS product_keys_product_sold_idx ON product_keys (product_id, sold);
+CREATE INDEX IF NOT EXISTS shop_orders_tenant_account_idx ON shop_orders (tenant_id, account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS shop_orders_account_idx ON shop_orders (account_id);
+CREATE INDEX IF NOT EXISTS account_prices_tenant_idx ON account_prices (tenant_id, account_id);
+CREATE INDEX IF NOT EXISTS categories_tenant_idx ON categories (tenant_id);
+CREATE INDEX IF NOT EXISTS tenant_bot_payments_tenant_idx ON tenant_bot_payments (tenant_id, created_at DESC);
+NOTIFY pgrst, 'reload schema';
