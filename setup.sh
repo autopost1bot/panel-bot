@@ -56,7 +56,7 @@ GRANT service_role TO authenticator;
 GRANT anon TO authenticator;
 SELECT 'CREATE DATABASE panelbot' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname='panelbot')\gexec
 SQL
-sudo -u postgres psql -v ON_ERROR_STOP=1 -d panelbot -f /root/panel-bot/schema.sql
+(cd /tmp && sudo -u postgres psql -v ON_ERROR_STOP=1 -d panelbot -f - < /root/panel-bot/schema.sql)
 sudo -u postgres psql -v ON_ERROR_STOP=1 -d panelbot <<SQL
 GRANT USAGE ON SCHEMA public TO service_role;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO service_role;

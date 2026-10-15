@@ -34,9 +34,11 @@ apply_schema() {
   local PSQL="psql"
   if command -v runuser >/dev/null 2>&1; then PSQL="runuser -u postgres -- psql"
   elif command -v sudo >/dev/null 2>&1; then PSQL="sudo -u postgres psql"; fi
-  if $PSQL -v ON_ERROR_STOP=1 -d panelbot -f "$APP_DIR/schema.sql" >> "$LOG" 2>&1; then
+  # The postgres user cannot open files under /root, so root reads the file
+  # and feeds it on stdin; run from /tmp so psql can change directory.
+  if (cd /tmp && $PSQL -v ON_ERROR_STOP=1 -d panelbot -f - < "$APP_DIR/schema.sql") >> "$LOG" 2>&1; then
     echo "$NEW_HASH" > "$HASH_FILE"
-    $PSQL -d panelbot -c "NOTIFY pgrst, 'reload schema';" >> "$LOG" 2>&1
+    (cd /tmp && $PSQL -d panelbot -c "NOTIFY pgrst, 'reload schema';") >> "$LOG" 2>&1
     systemctl restart postgrest >> "$LOG" 2>&1 || true
     sleep 2
     echo "[$(date -u '+%F %T UTC')] schema applied, database API reloaded" >> "$LOG"
