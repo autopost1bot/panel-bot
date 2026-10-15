@@ -829,6 +829,8 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   const db = await getDb();
   const own = ctx.isBoss;
 
+  const ak = own ? data.match(/^x:ak:(\d+)$/) : null;
+  if (ak) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ak[1])); }
   if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : shopMenu(ctx, reply); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
 
@@ -1012,7 +1014,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return;
   }
   if ((m = data.match(/^a:p:(\d+)$/)) && own) return adminProduct(ctx, reply, Number(m[1]));
-  if ((m = data.match(/^a:k:(\d+)$/)) && own) return ask(ctx, reply, { s: "add_keys", pid: Number(m[1]) }, "📝 Send keys, one by one:");
+  if ((m = data.match(/^a:k:(\d+)$/)) && own) return ask(ctx, reply, { s: "add_keys", pid: Number(m[1]) }, "📝 Send keys, one by one:", kb([btn("✖️ Cancel", `x:ak:${m[1]}`)]));
   if ((m = data.match(/^a:sp:(\d+)$/)) && own) return ask(ctx, reply, { s: "set_price", pid: Number(m[1]) }, "📝 Type new price:");
   if ((m = data.match(/^a:sc:(\d+)$/)) && own) return ask(ctx, reply, { s: "set_cost", pid: Number(m[1]) }, "🏷 Send the new cost (e.g. 3):");
   if ((m = data.match(/^a:sn:(\d+)$/)) && own) return ask(ctx, reply, { s: "set_name", pid: Number(m[1]) }, "✏️ Send the new name (premium emoji allowed):");
