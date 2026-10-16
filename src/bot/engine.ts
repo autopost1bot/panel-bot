@@ -429,6 +429,14 @@ async function clearCatalog(db: any, tenantId: number) {
   await db.from("categories").delete().eq("tenant_id", tenantId);
 }
 
+const TOKEN_COOLDOWN_MS = 24 * 3600000;
+/** Milliseconds until this account may change its bot token again (0 = allowed). */
+export async function tokenCooldown(db: any, accountId: number): Promise<number> {
+  const { data } = await db.from("bot_settings").select("value").eq("tenant_id", 0).eq("key", `token_changed_${accountId}`).maybeSingle();
+  const at = Number(data?.value ?? 0);
+  return at ? Math.max(0, at + TOKEN_COOLDOWN_MS - Date.now()) : 0;
+}
+
 async function categories(db: any, tenantId: number) {
   const [csRes, psRes] = await Promise.all([
     db.from("categories").select("*").eq("tenant_id", tenantId).order("id"),
@@ -960,8 +968,13 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       const { data: clash } = await db.from("tenant_bots").select("id").eq("token", raw).maybeSingle();
       if (clash) { await reply("❌ This bot is already used by another account."); return; }
       const { data: prev } = await db.from("tenant_bots").select("id, token").eq("owner_account_id", ctx.session.accountId!).maybeSingle();
-      // A different Telegram bot starts with an empty shop; emoji/colors/settings stay.
-      if (prev && String(prev.token ?? "").split(":")[0] !== raw.split(":")[0]) await clearCatalog(db, Number(prev.id));
+      const changing = !!(prev && prev.token);
+      if (changing && (await tokenCooldown(db, ctx.session.accountId!)) > 0) { ctx.session.step = null; await reply("⏳ You can change the bot token once every 24 hours."); return; }
+      // Changing the token wipes the shop (categories, products, durations, keys); emoji/colors/settings stay.
+      if (changing) {
+        await clearCatalog(db, Number(prev.id));
+        await db.from("bot_settings").upsert({ tenant_id: 0, key: `token_changed_${ctx.session.accountId}`, value: String(Date.now()) }, { onConflict: "tenant_id,key" });
+      }
       const { data: t } = await db.from("tenant_bots").update({ token: raw, bot_username: me.username, owner_tg_id: tgId }).eq("owner_account_id", ctx.session.accountId!).select("id").single();
       ctx.session.step = null;
       // Register the tenant webhook so the bot runs 24/7 on this server
@@ -1717,6 +1730,8 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   }
   if (data === "tsub:token") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    const wait = await tokenCooldown(db, ctx.session.accountId);
+    if (wait > 0) { await reply(`⏳ You can change the bot token once every 24 hours.\nTry again in <b>${Math.ceil(wait / 3600000)}h</b>.`); return; }
     ctx.session.step = { s: "await_token" };
     await reply(tokenHelp());
     return;
