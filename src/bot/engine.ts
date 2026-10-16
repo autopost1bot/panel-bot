@@ -527,6 +527,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("👋 Welcome text", "a:wel"), btn(hidden ? "👁 Show prices" : "🙈 Hide prices", "a:hide")],
     [btn("💬 Support username", "a:sup"), btn("👥 Logged-in users", "a:users:0")],
     [btn("✨ Premium emoji", "a:emoji"), btn("🎨 Button colors", "a:colors")],
+    ...(ctx.bot.isMain ? [] : [[btn("💲 Custom prices", "a:cpu")]]),
     ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("🚫 Remove user", "a:rmu")]] : []),
   ));
 }
@@ -1368,6 +1369,14 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return;
   }
   if (data === "a:accs" && own) return manageList(ctx, reply);
+  if (data === "a:cpu" && own) {
+    const { data: cs } = await db.from("bot_accounts").select("id,username,tg_name").eq("tenant_id", bot.tenantId).order("username").limit(60);
+    if (!cs?.length) { await reply("👥 No accounts yet. Add one first with 👤 Add account.", kb([btn("⬅️ Go back", "a:home")])); return; }
+    const rows: any[][] = [];
+    for (let i = 0; i < cs.length; i += 2) rows.push(cs.slice(i, i + 2).map((c: any) => btn(plainLabel(c.username), `a:cp:${c.id}`)));
+    await reply("💲 <b>Custom prices</b>\nChoose an account to set special prices:", { ...kb(...rows, [btn("⬅️ Go back", "a:home")]), noButtonColors: true });
+    return;
+  }
   if ((m = data.match(/^a:users:(\d+)$/)) && own) return usersPage(ctx, reply, Number(m[1]));
   if ((m = data.match(/^a:purch(?::(\d+))?$/)) && own) {
     return historyPage(ctx, reply, Number(m[1] ?? 0), "a:purch");
@@ -2111,11 +2120,12 @@ const QC_GRID: [string, string][][] = [
   [["support", "💬 Support username"], ["users", "👥 Logged-in users"]],
   [["emoji", "✨ Premium emoji"], ["colors", "🎨 Button colors"]],
   [["tenants", "🤖 Reseller bots"], ["affiliates", "💰 Affiliates"]],
+  [["custom_prices", "💲 Custom prices"]],
   [["remove_user", "🚫 Remove user"]],
 ];
 function qcGrid(ctx: Ctx): [string, string][][] {
   return QC_GRID
-    .map(row => row.filter(([id]) => ctx.bot.isMain ? id !== "add_account" : !["tenants", "affiliates", "remove_user"].includes(id)))
+    .map(row => row.filter(([id]) => ctx.bot.isMain ? !["add_account", "custom_prices"].includes(id) : !["tenants", "affiliates", "remove_user"].includes(id)))
     .filter(row => row.length);
 }
 
