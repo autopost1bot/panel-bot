@@ -2139,9 +2139,9 @@ async function quickColors(ctx: Ctx, reply: (h: string, e?: any) => any, data: s
   const qc = ctx.session.qc;
   const ids = qcGrid(ctx).flat().map(([id]) => id);
   const b = data.match(/^a:qc:b:(default|primary|success|danger)$/);
-  if (b) qc.brush = b[1]!;
+  if (b && isButtonColor(b[1])) qc.brush = b[1];
   const t = data.match(/^a:qc:t:([a-z_]+)$/);
-  if (t && ids.includes(t[1]!)) qc.draft[t[1]!] = qc.brush;
+  if (t?.[1] && ids.includes(t[1])) qc.draft[t[1]] = qc.brush;
   if (data === "a:qc:all") for (const id of ids) qc.draft[id] = qc.brush;
   if (data === "a:qc:x") { ctx.session.qc = undefined; return colorsMenu(ctx, reply); }
   if (data === "a:qc:save") {
@@ -2151,7 +2151,8 @@ async function quickColors(ctx: Ctx, reply: (h: string, e?: any) => any, data: s
     ctx.emojiOwn.buttons = saved;
     await saveEmojiTheme(ctx);
     ctx.session.qc = undefined;
-    await reply("✅ All button colors saved.");
+    // Telegram cannot replace a persistent keyboard through editMessageText.
+    await sendHtml(ctx.bot.token, ctx.chatId, themeHtml("✅ All button colors saved.", ctx.emoji), themeExtra(menuKb(ctx), ctx.emoji));
     return adminMenu(ctx, reply);
   }
   const fallback = saved.inline;
