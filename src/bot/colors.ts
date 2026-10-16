@@ -13,7 +13,7 @@ export const COLOR_BUTTONS = [
   { id: "save", label: "Save", aliases: ["Confirm"], actions: ["a:vsave"] },
   { id: "finish", label: "Finish" },
   { id: "cancel", label: "Cancel", actions: ["x:cancel", "a:vcancel"] },
-  { id: "back", label: "Go back", aliases: ["Back", "Menu", "Category", "Product", "Back to accounts", "Products", "Categories", "Reseller bots"] },
+  { id: "back", label: "Go back", aliases: ["Back", "Menu", "Category", "Product", "Back to accounts"] },
   { id: "history", label: "Purchase History", aliases: ["My orders", "Look at purchases"], actions: ["c:orders", "a:mo:", "a:purch"] },
   { id: "stock", label: "Stock", actions: ["a:stock"] },
   { id: "stats", label: "Statistics", aliases: ["Orders & profit"], actions: ["a:stats"] },
@@ -81,9 +81,10 @@ export function buttonColorId(button: Record<string, any>): string | undefined {
   const text = String(button.text ?? "").replace(/<tg-emoji\b[^>]*>[\s\S]*?<\/tg-emoji>/g, "").replace(/^[^A-Za-z]+/, "").trim().toLowerCase();
   const callback = String(button.callback_data ?? "");
   if (/^(back\b|go back\b|menu$)/.test(text) || /^[⬅🔙]/u.test(String(button.text ?? ""))) return "back";
+  const action = COLOR_BUTTONS.find(item => item.actions?.some(action => action.endsWith(":") ? callback.startsWith(action) : callback === action));
+  if (action) return action.id;
   const label = COLOR_BUTTONS.find(item => [item.label, ...(item.aliases ?? [])].some(name => name.toLowerCase() === text));
-  if (label) return label.id;
-  return COLOR_BUTTONS.find(item => item.actions?.some(action => action.endsWith(":") ? callback.startsWith(action) : callback === action))?.id;
+  return label?.id;
 }
 export function colorExtra(extra: Record<string, any>, colors?: ButtonColors): Record<string, any> {
   // Picker lists ("choose an icon / product / category") hold data rows whose
