@@ -5,6 +5,7 @@
 
 import { getDb } from "./db";
 import { sendHtml, money, escapeHtml } from "./tg";
+import { parseEmojiTheme, themeHtml } from "./emoji";
 
 export const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"; // USDT on BSC, 18 decimals
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -103,7 +104,14 @@ async function notifyPaid(notifyToken: string, tgId: number, r: any, network: Ne
   const text = r.kind === "sub"
     ? `✅ <b>Payment received!</b>\n\n💳 ${money(r.amount)} ${label} confirmed.\n🤖 Your bot subscription is active until <b>${escapeHtml(String(r.expires_at ?? "").slice(0, 10))}</b>.`
     : `✅ <b>Payment received!</b>\n\n💳 ${money(r.amount)} ${label} confirmed.\n💰 New balance: <b>${money(r.balance)}</b>`;
-  await sendHtml(notifyToken, tgId, text).catch(() => {});
+  // Apply the main bot's Premium emoji theme (set in Admin → Premium emoji).
+  let themed = text;
+  try {
+    const db = await getDb();
+    const { data } = await db.from("bot_settings").select("value").eq("tenant_id", 0).eq("key", "premium_emoji").maybeSingle();
+    themed = themeHtml(text, parseEmojiTheme(data?.value ?? null));
+  } catch { /* keep plain emoji */ }
+  await sendHtml(notifyToken, tgId, themed).catch(() => {});
 }
 
 /** TRC20 pass: incoming USDT transfers to the Tron wallet since the oldest
