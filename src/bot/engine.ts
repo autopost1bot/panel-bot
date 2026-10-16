@@ -115,6 +115,28 @@ function normalizeDuration(line: string): string {
   return `${n} ${n === 1 ? "Day" : "Days"}`;
 }
 
+// ─── Duration ordering: variants list serially 1 Day, 3 Days, 7 Days, 30 Days… ─
+const DURATION_UNITS: [RegExp, number][] = [
+  [/^min(?:ute)?s?$/i, 1 / 1440],
+  [/^h(?:r|rs|our|ours)?$/i, 1 / 24],
+  [/^d(?:ay|ays)?$/i, 1],
+  [/^w(?:k|ks|eek|eeks)?$/i, 7],
+  [/^m(?:on|onth|onths)?$/i, 30],
+  [/^y(?:r|rs|ear|ears)?$/i, 365],
+];
+function durationDays(name: string): number {
+  const text = name.replace(/<tg-emoji[^>]*>.*?<\/tg-emoji>/g, " ");
+  const m = text.match(/(\d+(?:[.,]\d+)?)\s*([a-zA-Z]+)?/);
+  if (!m || !m[1]) return Number.POSITIVE_INFINITY;
+  const n = Number(m[1].replace(",", "."));
+  if (!Number.isFinite(n)) return Number.POSITIVE_INFINITY;
+  const unit = DURATION_UNITS.find(([re]) => re.test(m[2] ?? "d"));
+  return (unit ? unit[1] : 1) * n;
+}
+function byDuration(a: { name: string; id: number }, b: { name: string; id: number }): number {
+  return durationDays(a.name) - durationDays(b.name) || a.id - b.id;
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
@@ -422,8 +444,9 @@ async function getProduct(db: any, tenantId: number, pid: number) {
 }
 async function variantsOf(db: any, tenantId: number, pid: number) {
   const { data: vs } = await db.from("products").select("*").eq("tenant_id", tenantId).eq("parent_id", pid).order("price").order("id");
-  const map = await stockMap(db, (vs ?? []).map((v: any) => v.id));
-  return (vs ?? []).map((v: any) => ({ ...v, stock: map.get(Number(v.id)) ?? 0 }));
+  const rows = (vs ?? []).slice().sort(byDuration);
+  const map = await stockMap(db, rows.map((v: any) => v.id));
+  return rows.map((v: any) => ({ ...v, stock: map.get(Number(v.id)) ?? 0 }));
 }
 async function topProducts(db: any, tenantId: number, cat: number | null | "all") {
   let q = db.from("products").select("*").eq("tenant_id", tenantId).is("parent_id", null).order("id");
