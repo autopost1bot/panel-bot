@@ -2034,8 +2034,8 @@ async function affiliateAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data
   const p = Math.min(page, pages - 1);
   const slice = list.slice(p * 10, p * 10 + 10);
   const ids = slice.map(([id]) => id);
-  const { data: accs } = ids.length ? await db.from("bot_accounts").select("id,username,tg_username").in("id", ids) : { data: [] as any[] };
-  const name = (id: number) => { const a = (accs ?? []).find((x: any) => x.id === id); return a ? (a.tg_username ? `@${a.tg_username}` : a.username) : `#${id}`; };
+  const { data: accs } = ids.length ? await db.from("bot_accounts").select("id,username,tg_name").in("id", ids) : { data: [] as any[] };
+  const name = (id: number) => { const a = (accs ?? []).find((x: any) => x.id === id); return a?.tg_name || `User #${id}`; };
   const lines = slice.map(([id, v], i) => `${p * 10 + i + 1}. ${escapeHtml(name(id))} — 👥 ${v.inv} · 🛒 ${v.sales} · 💵 ${money(v.total)}`);
   const nav: any[] = [];
   if (p > 0) nav.push(btn("⬅️ Prev", `a:aff:${p - 1}`));
