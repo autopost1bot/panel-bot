@@ -402,6 +402,13 @@ async function topProducts(db: any, tenantId: number, cat: number | null | "all"
     return { ...p, stock, nvars: vs.length, from_price };
   });
 }
+/** Remove one reseller shop's catalog; keys, variants and custom prices cascade. Never the main shop. */
+async function clearCatalog(db: any, tenantId: number) {
+  if (!tenantId) return;
+  await db.from("products").delete().eq("tenant_id", tenantId);
+  await db.from("categories").delete().eq("tenant_id", tenantId);
+}
+
 async function categories(db: any, tenantId: number) {
   const [csRes, psRes] = await Promise.all([
     db.from("categories").select("*").eq("tenant_id", tenantId).order("id"),
@@ -931,6 +938,9 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (!me) { await reply("❌ Telegram rejected this token. Check it in @BotFather and send again."); return; }
       const { data: clash } = await db.from("tenant_bots").select("id").eq("token", raw).maybeSingle();
       if (clash) { await reply("❌ This bot is already used by another account."); return; }
+      const { data: prev } = await db.from("tenant_bots").select("id, token").eq("owner_account_id", ctx.session.accountId!).maybeSingle();
+      // A different Telegram bot starts with an empty shop; emoji/colors/settings stay.
+      if (prev && String(prev.token ?? "").split(":")[0] !== raw.split(":")[0]) await clearCatalog(db, Number(prev.id));
       const { data: t } = await db.from("tenant_bots").update({ token: raw, bot_username: me.username, owner_tg_id: tgId }).eq("owner_account_id", ctx.session.accountId!).select("id").single();
       ctx.session.step = null;
       // Register the tenant webhook so the bot runs 24/7 on this server
@@ -1166,7 +1176,17 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     await reply("🔧 Choose action", kb(
       [btn("🔓 Manage accounts", "a:accs")],
       [btn("🔍 Look at purchases", "a:purch")],
+      ...(bot.isMain ? [] : [[btn("🗑 Delete all products", "a:wipe")]]),
       [btn("⬅️ Go back", "a:home")]));
+    return;
+  }
+  if (data === "a:wipe" && own && !bot.isMain) {
+    await reply("⚠️ Delete <b>all</b> categories, products and keys in this bot?\nEmoji, colors, accounts and balances stay.", kb([btn("🗑 Yes, delete all", "a:wipeok"), btn("Cancel", "a:manage")]));
+    return;
+  }
+  if (data === "a:wipeok" && own && !bot.isMain) {
+    await clearCatalog(db, bot.tenantId);
+    await reply("🗑 All products and categories deleted. The shop is empty now.", kb([btn("➕ Add product", "a:add")], [btn("⬅️ Go back", "a:home")]));
     return;
   }
   if (data === "a:accs" && own) return manageList(ctx, reply);
