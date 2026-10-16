@@ -114,6 +114,23 @@ async function notifyPaid(notifyToken: string, tgId: number, r: any, network: Ne
   await sendHtml(notifyToken, tgId, themed).catch(() => {});
 }
 
+/** Affiliate commission for a crypto-paid subscription (once per payment id). */
+async function creditAffiliateCrypto(notifyToken: string, paymentId: number, accountId: number) {
+  try {
+    const db = await getDb();
+    const { data: rows } = await db.from("bot_settings").select("key,value").eq("tenant_id", 0).in("key", ["aff_enabled", "aff_amount"]);
+    const get = (k: string) => (rows ?? []).find((r: any) => r.key === k)?.value;
+    if (get("aff_enabled") === "0") return;
+    const n = Number(get("aff_amount") ?? 5);
+    const amount = Number.isFinite(n) && n >= 0 ? n : 5;
+    if (amount <= 0) return;
+    const { data: r } = await db.rpc("credit_affiliate", { p_buyer: accountId, p_amount: amount, p_source: `crypto:${paymentId}` });
+    if (r && (r as any).ok && (r as any).tg_id) {
+      await sendHtml(notifyToken, Number((r as any).tg_id), `🎉 You earned <b>${money(amount)}</b> commission from <b>${escapeHtml((r as any).buyer ?? "a referral")}</b>!\n💰 New balance: <b>${money((r as any).balance)}</b>`).catch(() => {});
+    }
+  } catch (e) { console.error("affiliate credit failed", e); }
+}
+
 /** TRC20 pass: incoming USDT transfers to the Tron wallet since the oldest
  *  waiting payment, matched by exact amount and created-before-transfer. */
 async function scanTrc20(waiting: any[], notifyToken: string): Promise<{ scanned: number; paid: number }> {
@@ -139,6 +156,7 @@ async function scanTrc20(waiting: any[], notifyToken: string): Promise<{ scanned
     used.add(match.id);
     paid++;
     await notifyPaid(notifyToken, Number(match.tg_id), r, "trc20");
+    if ((r as any).kind === "sub") await creditAffiliateCrypto(notifyToken, match.id, Number(match.account_id));
   }
   return { scanned: txs.length, paid };
 }
@@ -183,6 +201,7 @@ export async function scanPayments(notifyToken = "main"): Promise<{ scanned: num
     if (!res || (res as any).err) continue;
     paid++;
     await notifyPaid(notifyToken, Number(match.tg_id), res, "bep20");
+    if ((res as any).kind === "sub") await creditAffiliateCrypto(notifyToken, match.id, Number(match.account_id));
   }
 
   await db.from("bot_settings").upsert({ tenant_id: 0, key: "bsc_last_block", value: String(latest) });
