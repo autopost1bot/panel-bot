@@ -47,6 +47,10 @@ const PRESETS: [string, string][] = [
 // Professional prompt used whenever the bot needs a price from the admin.
 export const PRICE_ASK = "💵 Enter the price for this key type (USD $):";
 
+// Prompts of the product flow: shown as one line with a Cancel button below.
+const PRODUCT_PROMPTS: string[] = ["add_name", "add_vars", "var_price", "set_price", "set_cost", "set_name", "set_desc"];
+
+
 
 type Step =
   | { s: "login_user" } | { s: "login_pass"; username: string }
@@ -576,8 +580,14 @@ async function startWelcome(ctx: Ctx, reply: (h: string, e?: any) => any) {
 
 async function ask(ctx: Ctx, reply: (h: string, e?: any) => any, step: Step, text: string, extra?: any) {
   ctx.session.step = step;
-  if (["add_name", "add_vars", "var_price", "var_confirm", "set_price", "add_keys"].includes(step.s)) {
+  if (["var_confirm", "add_keys"].includes(step.s)) {
     await reply(text, extra ?? {});
+    return;
+  }
+  // Product prompts stay short — a Cancel button below instead of extra instructions.
+  if (!extra && PRODUCT_PROMPTS.includes(step.s)) {
+    const pid = "pid" in step ? Number(step.pid) : NaN;
+    await reply(text, kb([btn("✖️ Cancel", Number.isFinite(pid) ? `x:ap:${pid}` : "x:cancel")]));
     return;
   }
   await reply(text + "\n\n/cancel to stop", extra ?? kb([btn("✖️ Cancel", "x:cancel")]));
@@ -1017,6 +1027,8 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
 
   const ak = own ? data.match(/^x:ak:(\d+)$/) : null;
   if (ak) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ak[1])); }
+  const ap = own ? data.match(/^x:ap:(\d+)$/) : null;
+  if (ap) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ap[1])); }
   if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : shopMenu(ctx, reply); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
 
