@@ -69,7 +69,7 @@ type Step =
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
 
-type Session = { refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined; identity?: { accountId: number; name: string; username: string } };
+type Session = { qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined; identity?: { accountId: number; name: string; username: string } };
 
 export type BotInfo = {
   token: string;
@@ -553,6 +553,7 @@ async function colorsMenu(ctx: Ctx, reply: (h: string, e?: any) => any, requeste
   if (page > 0) nav.push(btn("⬅️ Previous", `a:colors:page:${page - 1}`));
   if (page + 1 < pages) nav.push(btn("Next ➡️", `a:colors:page:${page + 1}`));
   if (nav.length) rows.push(nav);
+  rows.unshift([btn("🖌 Quick color admin panel", "a:qc")]);
   rows.push([btn("⬅️ Go back", "a:home")]);
   await reply(`🎨 <b>Button Colors (${page + 1}/${pages})</b>\n\n${items.map(button => `· ${button.label} — ${colorLabel(button.id)}`).join("\n")}`, kb(...rows));
 }
@@ -1154,6 +1155,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   }
 
 
+  if (data.startsWith("a:qc") && own) return quickColors(ctx, reply, data);
   if (data.startsWith("a:colors")) {
     if (!own) return;
     ctx.session.step = null;
@@ -2059,4 +2061,62 @@ export async function creditAffiliate(bot: BotInfo, buyerAccountId: number, sour
       await sendHtml(bot.token, Number((r as any).tg_id), `🎉 You earned <b>${money(amount)}</b> commission from <b>${escapeHtml((r as any).buyer ?? "a referral")}</b>!\n💰 New balance: <b>${money((r as any).balance)}</b>`).catch(() => {});
     }
   } catch (e) { console.error("affiliate credit failed", e); }
+}
+
+// ─── Quick color editor: tap admin-panel buttons, then Save once ─────────────
+const QC_GRID: [string, string][][] = [
+  [["add_product", "➕ Add product"], ["products", "📦 Products"]],
+  [["categories", "📂 Categories"], ["stock", "📦 Stock"]],
+  [["manage", "🔧 Manage"], ["buy", "🛍 View shop"]],
+  [["add_account", "👤 Add account"], ["add_balance", "💰 Add balance"]],
+  [["stats", "📊 Orders & profit"], ["broadcast", "📣 Broadcast"]],
+  [["welcome", "👋 Welcome text"], ["hide", "🙈 Hide prices"]],
+  [["support", "💬 Support username"], ["users", "👥 Logged-in users"]],
+  [["emoji", "✨ Premium emoji"], ["colors", "🎨 Button colors"]],
+  [["tenants", "🤖 Reseller bots"], ["affiliates", "💰 Affiliates"]],
+  [["remove_user", "🚫 Remove user"]],
+];
+function qcGrid(ctx: Ctx): [string, string][][] {
+  return QC_GRID
+    .map(row => row.filter(([id]) => ctx.bot.isMain ? id !== "add_account" : !["tenants", "affiliates", "remove_user"].includes(id)))
+    .filter(row => row.length);
+}
+
+async function quickColors(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
+  ctx.session.step = null;
+  const saved = parseButtonColors(ctx.emoji.buttons);
+  if (data === "a:qc" || !ctx.session.qc) ctx.session.qc = { brush: "primary", draft: { ...(saved.items ?? {}) } };
+  const qc = ctx.session.qc;
+  const ids = qcGrid(ctx).flat().map(([id]) => id);
+  const b = data.match(/^a:qc:b:(default|primary|success|danger)$/);
+  if (b) qc.brush = b[1]!;
+  const t = data.match(/^a:qc:t:([a-z_]+)$/);
+  if (t && ids.includes(t[1]!)) qc.draft[t[1]!] = qc.brush;
+  if (data === "a:qc:all") for (const id of ids) qc.draft[id] = qc.brush;
+  if (data === "a:qc:x") { ctx.session.qc = undefined; return colorsMenu(ctx, reply); }
+  if (data === "a:qc:save") {
+    const items: Record<string, any> = { ...(saved.items ?? {}) };
+    for (const id of ids) if (qc.draft[id] && isButtonColor(qc.draft[id])) items[id] = qc.draft[id];
+    saved.items = items;
+    ctx.emojiOwn.buttons = saved;
+    await saveEmojiTheme(ctx);
+    ctx.session.qc = undefined;
+    await reply("✅ All button colors saved.");
+    return adminMenu(ctx, reply);
+  }
+  const fallback = saved.inline;
+  const styled = (label: string, cb: string, color?: string) => {
+    const x: any = btn(label, cb);
+    const c = color ?? fallback;
+    if (c && c !== "default") x.style = c;
+    return x;
+  };
+  const brushName = BUTTON_COLORS.find(c => c.value === qc.brush)?.label ?? "Default";
+  const rows: any[][] = [
+    BUTTON_COLORS.map(c => styled(`${qc.brush === c.value ? "✓ " : ""}${c.value === "default" ? "⚪ None" : c.label}`, `a:qc:b:${c.value}`, c.value)),
+    ...qcGrid(ctx).map(row => row.map(([id, label]) => styled(label, `a:qc:t:${id}`, qc.draft[id]))),
+    [styled(`🪣 Apply ${brushName} to all`, "a:qc:all", qc.brush)],
+    [btn("💾 Save", "a:qc:save"), btn("✖️ Cancel", "a:qc:x")],
+  ];
+  await reply(`🖌 <b>Quick colors</b>\n\n1. Pick a color at the top (now: <b>${brushName}</b>).\n2. Tap any buttons below to paint them — one or many.\n3. Tap <b>💾 Save</b> to keep all changes.`, { ...kb(...rows), noButtonColors: true });
 }
