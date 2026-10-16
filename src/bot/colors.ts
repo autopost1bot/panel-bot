@@ -51,6 +51,8 @@ export const COLOR_BUTTONS = [
   { id: "emoji_products", label: "Product & duration emoji", actions: ["a:emoji:products"] },
   { id: "emoji_categories", label: "Category emoji", actions: ["a:emoji:categories"] },
   { id: "emoji_toggle", label: "Premium: ON / OFF", actions: ["a:emoji:toggle"] },
+  { id: "affiliates", label: "Affiliates", actions: ["a:aff:", "aff:menu"] },
+  { id: "remove_user", label: "Remove user", actions: ["a:rmu"] },
 ] as { id: string; label: string; aliases?: string[]; actions?: string[] }[];
 export const BUTTON_COLORS: { value: ButtonColor; label: string }[] = [
   { value: "default", label: "Default" },
