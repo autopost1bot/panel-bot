@@ -1807,40 +1807,41 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
     await reply("🔐 Please log in first.\nSend your <b>username</b>:", kb([btn("✖️ Cancel", "x:cancel")]));
     return;
   }
+  // Go back returns to the bought product's duration list (its parent when a variant was bought).
+  const { data: bought } = await db.from("products").select("parent_id").eq("id", pid).eq("tenant_id", ctx.bot.tenantId).maybeSingle();
+  const backTo = bought?.parent_id ? `c:p:${bought.parent_id}` : `c:p:${pid}`;
   const { data, error } = await db.rpc("buy_keys", { p_tenant: ctx.bot.tenantId, p_account: acc.id, p_product: pid, p_qty: qty });
   if (error) {
     const stockMatch = /STOCK:(\d+)/.exec(error.message ?? "");
     const errTxt = stockMatch ? (Number(stockMatch[1]) ? `Only ${stockMatch[1]} in stock.` : "Out of stock.") : "Purchase failed. Please try again.";
-    await reply("❌ " + errTxt, kb([btn("⬅️ Back", `c:p:${pid}`)]));
+    await reply("❌ " + errTxt, kb([btn("⬅️ Back", backTo)]));
     return;
   }
   const res = data as any;
-  if (res?.err) { await reply("❌ " + res.err, kb([btn("⬅️ Back", `c:p:${pid}`)])); return; }
+  if (res?.err) { await reply("❌ " + res.err, kb([btn("⬅️ Back", backTo)])); return; }
   const header = `✅ <b>Purchase completed</b>\n` +
-    `📦 <b>${escapeHtml(plainLabel(res.label))}</b> · Quantity: <b>${qty}</b>\n` +
-    `💵 Total paid: <b>${ctx.hide ? "$" : money(res.total)}</b>\n\n`;
-  const footer = `\n\n💰 Current balance: <b>${money(res.balance)}</b>`;
-  const keys = (res.keys as string[]).map((key, index) => `<b>#${res.orders[index]}</b>: <code>${escapeHtml(key)}</code>`);
+    `🔑 You bought <b>${escapeHtml(plainLabel(res.label))}</b> · Quantity: <b>${qty}</b>\n\n`;
+  const footer = `\n\n💬 New balance: <b>${money(res.balance)}</b>`;
+  const keys = (res.keys as string[]).map((key) => `Key: <code>${escapeHtml(key)}</code>`);
   const receipts: string[] = [];
-  let receipt = header + "🔑 ";
+  let receipt = header;
   let entries = 0;
   // Preserve complete, individually copyable keys when a large purchase
   // needs multiple Telegram messages; ordinary purchases use one receipt.
   for (const key of keys) {
-    const separator = entries ? " | " : "";
+    const separator = entries ? "\n" : "";
     if (entries && receipt.length + separator.length + key.length + footer.length > 3800) {
       receipts.push(receipt);
-      receipt = "🔑 ";
+      receipt = "";
       entries = 0;
     }
-    receipt += (entries ? " | " : "") + key;
+    receipt += (entries ? "\n" : "") + key;
     entries++;
   }
   receipts.push(receipt + footer);
   const navigation = kb(
-    [btn("⬅️ Go back", `c:p:${pid}`)],
-    [btn("🛍 Buy more", "c:shop"), btn("🧾 Order history", "c:orders")],
-    [btn("🏠 Menu", "c:home")]);
+    [btn("⬅️ Go back", backTo)],
+    [btn("🧾 Order history", "c:orders"), btn("🏠 Menu", "c:home")]);
   for (let index = 0; index < receipts.length; index++) {
     const message = receipts[index];
     if (message === undefined) continue;
