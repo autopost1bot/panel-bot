@@ -9,7 +9,7 @@ export const EMOJI_LABELS: Record<string, string> = {
   "📂": "Categories", "👤": "Add account", "💰": "Balance", "📣": "Broadcast",
   "👋": "Welcome text", "🙈": "Hide prices", "👁": "Show prices", "🤖": "My Own Bot / Reseller bots",
   "🔑": "Keys", "🧾": "Purchase receipt", "📜": "Purchase History", "⬅️": "Go back",
-  "✖️": "Cancel", "✅": "Save / Confirm", "📝": "Position name", "⏱": "Duration",
+  "✖️": "Cancel", "✅": "Save / Confirm", "📝": "Product name", "⏱": "Duration",
   "💵": "Price", "🛒": "Buy one / Buy multiple", "🔢": "Quantity", "🏠": "Main menu",
   "✏️": "Rename / Edit", "🗑": "Delete", "📋": "Order details", "🔐": "Login / Password",
   "❌": "Reject / Error", "⚠️": "Warning", "⭐": "Featured", "📅": "Date / Expiry",
