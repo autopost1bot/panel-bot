@@ -143,12 +143,16 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
 
   // Register /start in the Telegram command menu once per reseller bot; the
   // MENU button stays empty on bots connected before this existed.
-  if (!bot.isMain) await ensureMenuCommands(bot).catch(() => {});
+  if (!bot.isMain) void ensureMenuCommands(bot).catch(() => {});
 
   // Load session
   const srow = sRes.data as any;
   const session: Session = (srow?.state as Session) ?? {};
+  let savedState = JSON.stringify(srow?.state ?? {});
   const save = async () => {
+    const next = JSON.stringify(session);
+    if (srow && next === savedState) return; // unchanged — skip the DB write
+    savedState = next;
     await db.from("bot_sessions").upsert({ tenant_id: bot.tenantId, tg_id: tgId, state: session as any, updated_at: new Date().toISOString() });
   };
 
