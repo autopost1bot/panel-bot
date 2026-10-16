@@ -638,8 +638,15 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
   const { bot, tgId } = ctx;
   const db = await getDb();
   let raw = text.trim();
-  const refM = /^\/start\s+ref_(\d+)$/.exec(raw);
-  if (refM) { raw = "/start"; if (bot.isMain) ctx.session.refBy = Number(refM[1]); }
+  const refM = /^\/start\s+(?:ref_(\d+)|([A-Za-z0-9]{5,11}))$/.exec(raw);
+  if (refM) {
+    raw = "/start";
+    if (bot.isMain && refM[1]) ctx.session.refBy = Number(refM[1]);
+    else if (bot.isMain && refM[2]) {
+      const { data: r } = await db.from("bot_accounts").select("id").eq("tenant_id", 0).eq("ref_code", refM[2]).maybeSingle();
+      if (r) ctx.session.refBy = r.id;
+    }
+  }
   const html = entitiesToHtml(text, entities).trim();
 
   if (raw === "/cancel") {
@@ -1999,7 +2006,8 @@ async function affiliateMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
   if (!ctx.session.accountId) { await reply("🔐 Please send /start first."); return; }
   const db = await getDb();
   if (!mainBotUsername) { const me: any = await tgCall(ctx.bot.token, "getMe").catch(() => null); mainBotUsername = me?.username ?? null; }
-  const link = `https://t.me/${mainBotUsername ?? "bot"}?start=ref_${ctx.session.accountId}`;
+  const code = await refCode(db, ctx.session.accountId);
+  const link = `https://t.me/${mainBotUsername ?? "bot"}?start=${code}`;
   const { count: invited } = await db.from("bot_accounts").select("id", { count: "exact", head: true }).eq("tenant_id", 0).eq("referred_by", ctx.session.accountId);
   const { data: earn } = await db.from("affiliate_earnings").select("amount").eq("referrer_id", ctx.session.accountId);
   const total = (earn ?? []).reduce((a: number, r: any) => a + Number(r.amount), 0);
@@ -2119,4 +2127,24 @@ async function quickColors(ctx: Ctx, reply: (h: string, e?: any) => any, data: s
     [btn("💾 Save", "a:qc:save"), btn("✖️ Cancel", "a:qc:x")],
   ];
   await reply(`🖌 <b>Quick colors</b>\n\n1. Pick a color at the top (now: <b>${brushName}</b>).\n2. Tap any buttons below to paint them — one or many.\n3. Tap <b>💾 Save</b> to keep all changes.`, { ...kb(...rows), noButtonColors: true });
+}
+
+const REF_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+/** Random 5–11 char referral code, unique per account, created once. */
+async function refCode(db: any, accountId: number): Promise<string> {
+  const { data: a } = await db.from("bot_accounts").select("ref_code").eq("id", accountId).maybeSingle();
+  if (a?.ref_code) return a.ref_code;
+  for (let i = 0; i < 10; i++) {
+    const len = 5 + Math.floor(Math.random() * 7);
+    const bytes = crypto.getRandomValues(new Uint8Array(len));
+    const code = Array.from(bytes, b => REF_CHARS[b % REF_CHARS.length]).join("");
+    const { data: taken } = await db.from("bot_accounts").select("id").eq("ref_code", code).maybeSingle();
+    if (taken) continue;
+    const { error } = await db.from("bot_accounts").update({ ref_code: code }).eq("id", accountId).is("ref_code", null);
+    if (!error) {
+      const { data: b } = await db.from("bot_accounts").select("ref_code").eq("id", accountId).maybeSingle();
+      if (b?.ref_code) return b.ref_code;
+    }
+  }
+  return `ref_${accountId}`;
 }
