@@ -61,7 +61,7 @@ type Step =
   | { s: "set_desc"; pid: number } | { s: "add_keys"; pid: number }
   | { s: "cat_new"; then: "add" | "list" } | { s: "cat_name"; cid: number }
   | { s: "acc_user" } | { s: "acc_pass"; username: string } | { s: "bal_add" }
-  | { s: "broadcast" } | { s: "welcome" } | { s: "support" } | { s: "aff_amount" }
+  | { s: "broadcast" } | { s: "welcome" } | { s: "support" } | { s: "aff_amount" } | { s: "rm_user" }
   | { s: "topup"; cid: number } | { s: "deduct"; cid: number }
   | { s: "buy_qty"; pid: number } | { s: "cprice"; cid: number; pid: number }
   | { s: "pay_amount"; net?: Network }
@@ -527,7 +527,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("👋 Welcome text", "a:wel"), btn(hidden ? "👁 Show prices" : "🙈 Hide prices", "a:hide")],
     [btn("💬 Support username", "a:sup"), btn("👥 Logged-in users", "a:users:0")],
     [btn("✨ Premium emoji", "a:emoji"), btn("🎨 Button colors", "a:colors")],
-    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")]] : []),
+    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("🚫 Remove user", "a:rmu")]] : []),
   ));
 }
 
@@ -1026,6 +1026,22 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(`📣 Sent to ${ok}/${(cs ?? []).length} accounts.`, kb([btn("⬅️ Menu", "a:home")]));
       return;
     }
+    case "rm_user": {
+      if (!ctx.isBoss || !bot.isMain) return;
+      const q = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
+      let tg: number | null = /^\d{3,20}$/.test(q) ? Number(q) : null;
+      if (tg === null) {
+        const { data: a } = await db.from("bot_accounts").select("tg_id").eq("tenant_id", 0).ilike("tg_username", q).not("tg_id", "is", null).limit(1).maybeSingle();
+        tg = a?.tg_id ? Number(a.tg_id) : null;
+      }
+      if (tg === null) { await reply("❌ User not found. Send their Telegram ID (numbers) or @username."); return; }
+      const { data: gone } = await db.from("bot_accounts").update({ tg_id: null }).eq("tenant_id", 0).eq("tg_id", tg).select("id");
+      await db.from("bot_sessions").delete().eq("tenant_id", 0).eq("tg_id", tg);
+      ctx.session.step = null;
+      if (tg === tgId) ctx.session.accountId = undefined;
+      await reply(`✅ User <code>${tg}</code> removed (${(gone ?? []).length} account). Next /start will be a fresh start.`, kb([btn("⬅️ Menu", "a:home")]));
+      return;
+    }
     case "aff_amount": {
       if (!ctx.isBoss || !bot.isMain) return;
       const n = Number(raw.replace(/[$\s]/g, "").replace(",", "."));
@@ -1469,6 +1485,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   }
 
   // ── Customer callbacks
+  if (data === "a:rmu" && own && bot.isMain) return ask(ctx, reply, { s: "rm_user" }, "🚫 <b>Remove user</b>\nSend the user's Telegram ID or @username.\nThey will start fresh on /start (like a brand-new user). Their old balance, orders and bot stay saved but are no longer linked.");
   if (data === "aff:menu" && bot.isMain) return affiliateMenu(ctx, reply);
   if (data.startsWith("a:aff") && own && bot.isMain) return affiliateAdmin(ctx, reply, data);
   if (data === "c:home") return own ? adminMenu(ctx, reply) : shopMenu(ctx, reply);
@@ -1989,7 +2006,7 @@ async function affiliateMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     `💰 <b>Start Earning By Affiliates</b>\n\n` +
     `Copy the Affiliates link and share with your friends, family, or anyone who might be interested in our services. ` +
     `You can earn commissions for every sale made through your referral link.\n\n` +
-    `🎁 Commission: <b>${money(amount)}</b> for every bot subscription they buy\n\n` +
+    `🎁 You get <b>${money(amount)}</b> balance every time someone you invite buys a bot subscription (e.g. 1 month).\n\n` +
     `🔗 Your link:\n<code>${escapeHtml(link)}</code>\n\n` +
     `👥 Invited: <b>${invited ?? 0}</b>\n🛒 Sales: <b>${(earn ?? []).length}</b>\n💵 Earned: <b>${money(total)}</b>`,
     kb([urlBtn("📤 Share link", `https://t.me/share/url?url=${encodeURIComponent(link)}`)], [btn("⬅️ Go back", "c:home")]),
