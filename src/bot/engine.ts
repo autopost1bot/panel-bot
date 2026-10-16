@@ -521,8 +521,9 @@ async function welcomeRows(ctx: Ctx): Promise<any[][]> {
 
 async function shopMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
   const acc = await getAccount(ctx);
-  const welcome = renderWelcome((await getSetting(ctx.bot, "welcome")) ?? DEFAULT_WELCOME, acc?.username ?? ctx.session.username);
-  await reply(`${welcome}\n\n💰 Balance: <b>${money(acc?.balance ?? 0)}</b>`, kb(...(await welcomeRows(ctx))));
+  const welcome = renderWelcome((await getSetting(ctx.bot, "welcome")) ?? (ctx.bot.isMain ? DEFAULT_WELCOME : DEFAULT_LOGIN_WELCOME), acc?.username ?? ctx.session.username);
+  const balanceIcon = ctx.bot.isMain ? "💰" : "💬";
+  await reply(`${welcome}\n\n${balanceIcon} Balance: <b>${money(acc?.balance ?? 0)}</b>`, kb(...(await welcomeRows(ctx))));
 }
 
 /** /start for a logged-in customer: welcome + inline buttons, and the
