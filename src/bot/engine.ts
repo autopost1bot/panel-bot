@@ -780,6 +780,18 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(`✅ TRC20 USDT wallet saved:\n<code>${escapeHtml(addr)}</code>\n\nTRC20 payments are now live. Incoming transfers are checked automatically every minute.`);
       return;
     }
+    if (cmd === "setaff") {
+      const v = Number(String(args[0] ?? "").replace(/[$\s]/g, "").replace(",", "."));
+      if (!args[0] || !Number.isFinite(v) || v < 0 || v > 1000) { await reply(`Usage: /setaff 5\nCurrent commission: <b>${money(await affAmount(bot))}</b> per subscription.`); return; }
+      await setSetting(bot, "aff_amount", String(v));
+      await reply(`✅ Affiliate commission is now <b>${money(v)}</b> per subscription.`);
+      return;
+    }
+    if (cmd === "affon" || cmd === "affoff") {
+      await setSetting(bot, "aff_enabled", cmd === "affon" ? "1" : "0");
+      await reply(cmd === "affon" ? "🟢 Affiliate program is ON." : "🔴 Affiliate program is OFF.");
+      return;
+    }
   }
 
   const step = ctx.session.step;
