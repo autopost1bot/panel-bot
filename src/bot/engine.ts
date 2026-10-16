@@ -10,7 +10,7 @@ import {
   editHtml, sendHtml, tgCall, urlBtn, webhookSecret, type TgEntity,
 } from "./tg";
 
-import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, themeExtra, themeHtml, titlePrefix, type EmojiTheme } from "./emoji";
+import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, resolveEmojiTheme, themeExtra, themeHtml, titlePrefix, type EmojiTheme } from "./emoji";
 import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "./colors";
 import { availableNetworks, checkPayment, createPayment, getWallet, isTronAddress, NETWORK_CHAIN, NETWORK_LABEL, type CryptoPayment, type Network } from "./crypto";
 
@@ -84,6 +84,8 @@ type Ctx = {
   session: Session;
   isBoss: boolean;
   emoji: EmojiTheme;
+  emojiOwn: EmojiTheme;
+  emojiDefaults: EmojiTheme;
   hide: boolean;                 // customer view: show "$" instead of prices
   prices: Map<number, number>;   // customer view: account-specific prices
 };
@@ -115,12 +117,13 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   // run all independent lookups in parallel to minimise reply latency.
   const ackP = cq ? tgCall(bot.token, "answerCallbackQuery", { callback_query_id: cq.id }).catch(() => {}) : Promise.resolve();
   const isBoss0 = bot.isMain ? bot.adminTgIds.includes(tgId) : tgId === bot.ownerTgId;
-  const [tRes, sRes, hideRaw, cpRes, emojiRaw] = await Promise.all([
+  const [tRes, sRes, hideRaw, cpRes, emojiRaw, defaultEmojiRaw] = await Promise.all([
     bot.isMain ? Promise.resolve({ data: null as any }) : db.from("tenant_bots").select("*").eq("id", bot.tenantId).maybeSingle(),
     db.from("bot_sessions").select("state").eq("tenant_id", bot.tenantId).eq("tg_id", tgId).maybeSingle(),
     isBoss0 ? Promise.resolve(null) : getSetting(bot, "hide_prices"),
     isBoss0 ? Promise.resolve({ data: [] as any[] }) : db.from("account_prices").select("product_id, price, account_id").eq("tenant_id", bot.tenantId).then((r: any) => r, () => ({ data: [] })),
     getSetting(bot, "premium_emoji"),
+    bot.isMain ? Promise.resolve(null) : getSetting({ ...bot, tenantId: 0 }, "premium_emoji"),
   ]);
   if (!bot.isMain) {
     const t = tRes.data;
@@ -142,7 +145,9 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   };
 
   const isBoss = bot.isMain ? bot.adminTgIds.includes(tgId) : tgId === bot.ownerTgId;
-  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", tgUsername: String(from.username ?? ""), session, isBoss, emoji: parseEmojiTheme(emojiRaw), hide: false, prices: new Map() };
+  const emojiOwn = parseEmojiTheme(emojiRaw);
+  const emojiDefaults = parseEmojiTheme(defaultEmojiRaw);
+  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", tgUsername: String(from.username ?? ""), session, isBoss, emoji: resolveEmojiTheme(emojiOwn, emojiDefaults), emojiOwn, emojiDefaults, hide: false, prices: new Map() };
   (ctx as any).__msgId = msg?.message_id ?? null;
   // Customers see prices hidden (only "$") when the shop owner enabled it,
   // and their own account-specific prices when set.
@@ -303,6 +308,10 @@ async function setSetting(bot: BotInfo, key: string, value: string) {
   settingCache.delete(`${bot.tenantId}:${key}`);
   await db.from("bot_settings").upsert({ tenant_id: bot.tenantId, key, value });
   settingCache.set(`${bot.tenantId}:${key}`, { at: Date.now(), value });
+}
+async function saveEmojiTheme(ctx: Ctx) {
+  await setSetting(ctx.bot, "premium_emoji", JSON.stringify(ctx.emojiOwn));
+  ctx.emoji = resolveEmojiTheme(ctx.emojiOwn, ctx.emojiDefaults);
 }
 /** Remember who logged in and when (admin "Logged-in users" list). Never blocks the reply. */
 function recordLogin(ctx: Ctx, accountId: number) {
@@ -680,9 +689,14 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         return;
       }
       if (step.s === "emoji_icon") {
-        if (tag) ctx.emoji.icons[step.icon] = tag;
-        else delete ctx.emoji.icons[step.icon];
-        await setSetting(bot, "premium_emoji", JSON.stringify(ctx.emoji));
+        if (tag) {
+          ctx.emojiOwn.icons[step.icon] = tag;
+          ctx.emojiOwn.removedIcons = (ctx.emojiOwn.removedIcons ?? []).filter(icon => icon !== step.icon);
+        } else {
+          delete ctx.emojiOwn.icons[step.icon];
+          ctx.emojiOwn.removedIcons = [...new Set([...(ctx.emojiOwn.removedIcons ?? []), step.icon])];
+        }
+        await saveEmojiTheme(ctx);
       } else {
         const { data: item } = await db.from(step.kind).select("name").eq("tenant_id", bot.tenantId).eq("id", step.id).maybeSingle();
         if (!item) { ctx.session.step = null; await reply("❌ Item not found."); return; }
@@ -994,8 +1008,8 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
       const colors = parseButtonColors(ctx.emoji.buttons);
       // Explicit default overrides legacy group-wide preferences too.
       colors.items = { ...colors.items, [setMatch[1]]: setMatch[2] };
-      ctx.emoji.buttons = colors;
-      await setSetting(bot, "premium_emoji", JSON.stringify(ctx.emoji));
+      ctx.emojiOwn.buttons = colors;
+      await saveEmojiTheme(ctx);
       await sendHtml(bot.token, ctx.chatId, "✅ Button color updated.", themeExtra(menuKb(ctx), ctx.emoji));
       return colorsMenu(ctx, reply, Number(setMatch[3]));
     }
@@ -1004,8 +1018,8 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     const group = match[1] as "inline" | "keyboard";
     const colors = parseButtonColors(ctx.emoji.buttons);
     colors[group] = match[2];
-    ctx.emoji.buttons = colors;
-    await setSetting(bot, "premium_emoji", JSON.stringify(ctx.emoji));
+    ctx.emojiOwn.buttons = colors;
+    await saveEmojiTheme(ctx);
     // A reply keyboard is replaced with a fresh message, not editMessageText.
     if (group === "keyboard") {
       await sendHtml(bot.token, ctx.chatId, "✅ Bottom keyboard color updated.", themeExtra(menuKb(ctx), ctx.emoji));
@@ -1017,8 +1031,8 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (data.startsWith("a:emoji") && !own) return;
   if (data === "a:emoji") { ctx.session.step = null; return emojiMenu(ctx, reply); }
   if (data === "a:emoji:toggle") {
-    ctx.emoji.enabled = !ctx.emoji.enabled;
-    await setSetting(bot, "premium_emoji", JSON.stringify(ctx.emoji));
+    ctx.emojiOwn.enabled = !ctx.emoji.enabled;
+    await saveEmojiTheme(ctx);
     await reply("✅ Emoji display updated.", menuKb(ctx));
     return emojiMenu(ctx, reply);
   }

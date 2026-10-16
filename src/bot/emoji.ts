@@ -20,7 +20,7 @@ export const EMOJI_LABELS: Record<string, string> = {
   "💳": "Payments", "💬": "Support", "💸": "Top up / Deduct", "🔄": "Refresh / Renew",
   "🔙": "Back", "📌": "Notice", "👉": "Continue", "➡️": "Next",
 };
-export type EmojiTheme = { enabled: boolean; icons: Record<string, string>; buttons?: ButtonColors };
+export type EmojiTheme = { enabled: boolean; icons: Record<string, string>; buttons?: ButtonColors; removedIcons?: string[] };
 export function parseEmojiTheme(raw: string | null): EmojiTheme {
   try {
     const value = JSON.parse(raw ?? "{}");
@@ -28,8 +28,15 @@ export function parseEmojiTheme(raw: string | null): EmojiTheme {
     for (const icon of EMOJI_ICONS) {
       if (typeof value.icons?.[icon] === "string" && extractEmojiId(value.icons[icon])) icons[icon] = value.icons[icon];
     }
-    return { enabled: value.enabled !== false, icons, buttons: parseButtonColors(value.buttons) };
+    const removedIcons = EMOJI_ICONS.filter(icon => Array.isArray(value.removedIcons) && value.removedIcons.includes(icon));
+    return { enabled: value.enabled !== false, icons, buttons: parseButtonColors(value.buttons), ...(removedIcons.length ? { removedIcons } : {}) };
   } catch { return { enabled: true, icons: {} }; }
+}
+// Inherit only icons: button colors and Premium ON/OFF remain tenant-owned.
+export function resolveEmojiTheme(own: EmojiTheme, defaults: EmojiTheme): EmojiTheme {
+  const icons = { ...(defaults.enabled ? defaults.icons : {}), ...own.icons };
+  for (const icon of own.removedIcons ?? []) delete icons[icon];
+  return { ...own, icons };
 }
 export function emojiTag(text: string, entities: { type: string; offset: number; length: number; custom_emoji_id?: string }[]): string | null {
   const entity = entities.find(e => e.type === "custom_emoji" && /^\d+$/.test(e.custom_emoji_id ?? ""));
