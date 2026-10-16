@@ -121,7 +121,7 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
     bot.isMain ? Promise.resolve({ data: null as any }) : db.from("tenant_bots").select("*").eq("id", bot.tenantId).maybeSingle(),
     db.from("bot_sessions").select("state").eq("tenant_id", bot.tenantId).eq("tg_id", tgId).maybeSingle(),
     isBoss0 ? Promise.resolve(null) : getSetting(bot, "hide_prices"),
-    isBoss0 ? Promise.resolve({ data: [] as any[] }) : db.from("account_prices").select("product_id, price, account_id").eq("tenant_id", bot.tenantId).then((r: any) => r, () => ({ data: [] })),
+    isBoss0 ? Promise.resolve({ data: [] as any[] }) : tenantPrices(db, bot.tenantId),
     getSetting(bot, "premium_emoji"),
     bot.isMain ? Promise.resolve(null) : getSetting({ ...bot, tenantId: 0 }, "premium_emoji"),
   ]);
@@ -296,6 +296,16 @@ async function historyPage(ctx: Ctx, reply: (h: string, e?: any) => any, request
 const settingCache = new Map<string, { at: number; value: string | null }>();
 const SETTING_TTL = 60_000;
 export function clearSettingCache() { settingCache.clear(); }
+// Per-tenant custom prices, cached briefly; the admin price editor clears it on change.
+const priceCache = new Map<number, { at: number; res: any }>();
+async function tenantPrices(db: any, tenantId: number): Promise<any> {
+  const hit = priceCache.get(tenantId);
+  if (hit && Date.now() - hit.at < SETTING_TTL) return hit.res;
+  const res = await db.from("account_prices").select("product_id, price, account_id").eq("tenant_id", tenantId).then((r: any) => r, () => ({ data: [] }));
+  if (!res?.error) priceCache.set(tenantId, { at: Date.now(), res });
+  return res;
+}
+
 async function getSetting(bot: BotInfo, key: string): Promise<string | null> {
   const ck = `${bot.tenantId}:${key}`;
   const hit = settingCache.get(ck);
@@ -917,8 +927,10 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       const p = await getProduct(db, bot.tenantId, step.pid);
       ctx.session.step = null;
       if (!c || !p) { await reply("❌ Not found.", kb([btn("⬅️ Menu", "a:home")])); return; }
+      priceCache.delete(bot.tenantId);
       if (reset) await db.from("account_prices").delete().eq("account_id", step.cid).eq("product_id", step.pid);
       else await db.from("account_prices").upsert({ tenant_id: bot.tenantId, account_id: step.cid, product_id: step.pid, price: num });
+      priceCache.delete(bot.tenantId);
       await reply(reset ? "✅ Default price restored for this account." : `✅ Special price set: <b>${money(num)}</b>`, kb([btn("💲 Custom prices", `a:cp:${step.cid}`)]));
       return;
     }
