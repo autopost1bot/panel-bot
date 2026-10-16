@@ -137,6 +137,10 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
     }
   }
 
+  // Register /start in the Telegram command menu once per reseller bot; the
+  // MENU button stays empty on bots connected before this existed.
+  if (!bot.isMain) await ensureMenuCommands(bot).catch(() => {});
+
   // Load session
   const srow = sRes.data as any;
   const session: Session = (srow?.state as Session) ?? {};
@@ -307,6 +311,22 @@ async function setSetting(bot: BotInfo, key: string, value: string) {
   settingCache.delete(`${bot.tenantId}:${key}`);
   await db.from("bot_settings").upsert({ tenant_id: bot.tenantId, key, value });
   settingCache.set(`${bot.tenantId}:${key}`, { at: Date.now(), value });
+}
+// Telegram's MENU button shows a command list only after setMyCommands; register
+// /start once per reseller bot per process so every shop opens from the menu
+// button. Kept in memory only — the call is idempotent, so re-registering after
+// a restart is harmless and keeps bot_settings untouched.
+const menuCommandsDone = new Set<string>();
+export function clearMenuCommandsCache() { menuCommandsDone.clear(); }
+async function ensureMenuCommands(bot: BotInfo): Promise<void> {
+  if (menuCommandsDone.has(bot.token)) return;
+  menuCommandsDone.add(bot.token);
+  try {
+    await tgCall(bot.token, "setMyCommands", { commands: [{ command: "start", description: "Open the shop" }] });
+  } catch (e: unknown) {
+    menuCommandsDone.delete(bot.token); // retry on the next update
+    console.error("setMyCommands failed", e);
+  }
 }
 async function saveEmojiTheme(ctx: Ctx) {
   await setSetting(ctx.bot, "premium_emoji", JSON.stringify(ctx.emojiOwn));
@@ -952,6 +972,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         allowed_updates: ["message", "edited_message", "callback_query"],
         drop_pending_updates: true,
       }).catch((e: unknown) => console.error("tenant setWebhook failed", e));
+      await ensureMenuCommands({ ...bot, token: raw, tenantId: Number(t.id), ownerTgId: tgId, isMain: false, adminTgIds: [] }).catch(() => {});
       await reply(`🎉 <b>Your bot is live!</b>\n\nOpen @${escapeHtml(me.username)} and press /start — you are the admin there.`);
       return;
     }
