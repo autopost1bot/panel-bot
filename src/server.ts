@@ -1,4 +1,7 @@
 import { createServer } from "node:http";
+import { setDefaultResultOrder } from "node:dns";
+// Prefer IPv4: VPS IPv6 routes to Telegram are often slow and stall every request.
+setDefaultResultOrder("ipv4first");
 import { getDb } from "./bot/db";
 import { handleUpdate } from "./bot/engine";
 import { sendHtml, tgCall, webhookSecret } from "./bot/tg";
