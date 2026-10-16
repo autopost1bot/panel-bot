@@ -101,17 +101,43 @@ export function iconButton<T extends Record<string, unknown>>(
 
 // ─── Bot API calls ───────────────────────────────────────────────────────────
 
+// Reuse warm TLS connections to Telegram: fetch drops idle sockets after ~4s,
+// so every tap after a pause paid a fresh TCP+TLS handshake from the VPS.
+import { Agent, request as httpsRequest } from "node:https";
+const tgAgent = new Agent({ keepAlive: true, keepAliveMsecs: 30_000, maxSockets: 64, family: 4 } as any);
+function keepAlivePost(url: string, payload: string): Promise<{ status: number; ok: boolean; j: any }> {
+  return new Promise((resolve, reject) => {
+    const req = httpsRequest(url, { method: "POST", agent: tgAgent, timeout: 30_000, headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) } }, (res) => {
+      const chunks: Buffer[] = [];
+      res.on("data", (c) => chunks.push(c));
+      res.on("end", () => {
+        let j: any = {};
+        try { j = JSON.parse(Buffer.concat(chunks).toString("utf8")); } catch {}
+        const status = res.statusCode ?? 0;
+        resolve({ status, ok: status >= 200 && status < 300, j });
+      });
+      res.on("error", reject);
+    });
+    req.on("timeout", () => req.destroy(new Error("Telegram request timed out")));
+    req.on("error", reject);
+    req.end(payload);
+  });
+}
+
 export async function tgCall(token: string, method: string, body: Record<string, unknown> = {}): Promise<any> {
   // "main" = the admin bot; its token comes from ADMIN_BOT_TOKEN.
   if (token === "main") token = process.env["ADMIN_BOT_TOKEN"] ?? "";
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const j: any = await res.json().catch(() => ({}));
-  if (!res.ok || j.ok === false) {
-    throw new Error(`TG ${method} ${res.status}: ${JSON.stringify(j).slice(0, 300)}`);
+  const url = `https://api.telegram.org/bot${token}/${method}`;
+  const payload = JSON.stringify(body);
+  let status: number, ok: boolean, j: any;
+  if (process.env["VITEST"]) {
+    const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: payload });
+    status = res.status; ok = res.ok; j = await res.json().catch(() => ({}));
+  } else {
+    ({ status, ok, j } = await keepAlivePost(url, payload));
+  }
+  if (!ok || j.ok === false) {
+    throw new Error(`TG ${method} ${status}: ${JSON.stringify(j).slice(0, 300)}`);
   }
   return j.result;
 }
