@@ -159,3 +159,28 @@ CREATE INDEX IF NOT EXISTS account_prices_tenant_idx ON account_prices (tenant_i
 CREATE INDEX IF NOT EXISTS categories_tenant_idx ON categories (tenant_id);
 CREATE INDEX IF NOT EXISTS tenant_bot_payments_tenant_idx ON tenant_bot_payments (tenant_id, created_at DESC);
 NOTIFY pgrst, 'reload schema';
+
+-- Affiliates (main bot). Idempotent.
+ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS referred_by integer;
+CREATE INDEX IF NOT EXISTS bot_accounts_referred_by_idx ON bot_accounts (referred_by);
+CREATE TABLE IF NOT EXISTS affiliate_earnings (id serial PRIMARY KEY, referrer_id integer NOT NULL, buyer_id integer NOT NULL, amount double precision NOT NULL, source text NOT NULL UNIQUE, created_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE affiliate_earnings ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS affiliate_earnings_referrer_idx ON affiliate_earnings (referrer_id);
+CREATE OR REPLACE FUNCTION public.credit_affiliate(p_buyer integer, p_amount double precision, p_source text)
+ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public'
+AS $function$
+DECLARE b record; r record;
+BEGIN
+  SELECT * INTO b FROM bot_accounts WHERE id = p_buyer AND tenant_id = 0;
+  IF NOT FOUND OR b.referred_by IS NULL OR b.referred_by = b.id THEN RETURN jsonb_build_object('err', 'no referrer'); END IF;
+  INSERT INTO affiliate_earnings (referrer_id, buyer_id, amount, source) VALUES (b.referred_by, b.id, p_amount, p_source) ON CONFLICT (source) DO NOTHING;
+  IF NOT FOUND THEN RETURN jsonb_build_object('err', 'already credited'); END IF;
+  UPDATE bot_accounts SET balance = balance + p_amount WHERE id = b.referred_by AND tenant_id = 0 RETURNING * INTO r;
+  RETURN jsonb_build_object('ok', true, 'tg_id', r.tg_id, 'balance', r.balance, 'buyer', COALESCE('@' || b.tg_username, b.username));
+END;
+$function$;
+REVOKE EXECUTE ON FUNCTION public.credit_affiliate(integer, double precision, text) FROM PUBLIC, anon, authenticated;
+GRANT ALL ON affiliate_earnings TO service_role;
+GRANT ALL ON SEQUENCE affiliate_earnings_id_seq TO service_role;
+GRANT EXECUTE ON FUNCTION public.credit_affiliate(integer, double precision, text) TO service_role;
+NOTIFY pgrst, 'reload schema';
