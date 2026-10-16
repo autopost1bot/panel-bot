@@ -61,7 +61,7 @@ type Step =
   | { s: "set_desc"; pid: number } | { s: "add_keys"; pid: number }
   | { s: "cat_new"; then: "add" | "list" } | { s: "cat_name"; cid: number }
   | { s: "acc_user" } | { s: "acc_pass"; username: string } | { s: "bal_add" }
-  | { s: "broadcast" } | { s: "welcome" } | { s: "support" } | { s: "aff_amount" } | { s: "rm_user" }
+  | { s: "broadcast" } | { s: "welcome" } | { s: "support" } | { s: "aff_amount" } | { s: "aff_cu" } | { s: "aff_ca"; acc: number; name: string } | { s: "rm_user" }
   | { s: "topup"; cid: number } | { s: "deduct"; cid: number }
   | { s: "buy_qty"; pid: number } | { s: "cprice"; cid: number; pid: number }
   | { s: "pay_amount"; net?: Network }
@@ -1050,6 +1050,31 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(`✅ User <code>${tg}</code> removed (${(gone ?? []).length} account). Next /start will be a fresh start.`, kb([btn("⬅️ Menu", "a:home")]));
       return;
     }
+    case "aff_cu": {
+      if (!ctx.isBoss || !bot.isMain) return;
+      const q = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
+      let qb = db.from("bot_accounts").select("id,username,tg_name").eq("tenant_id", 0).not("tg_id", "is", null);
+      qb = /^\d{3,20}$/.test(q) ? qb.eq("tg_id", Number(q)) : qb.ilike("tg_username", q);
+      const { data: a } = await qb.limit(1).maybeSingle();
+      if (!a) { await reply("❌ User not found. Send their Telegram ID or @username (they must have started the bot)."); return; }
+      const name = a.tg_name || a.username;
+      return ask(ctx, reply, { s: "aff_ca", acc: a.id, name }, `🎯 Send the commission in $ for <b>${escapeHtml(name)}</b> (e.g. 10).\nSend <b>reset</b> to use the default again.`);
+    }
+    case "aff_ca": {
+      if (!ctx.isBoss || !bot.isMain) return;
+      if (/^reset$/i.test(raw)) {
+        await db.from("bot_accounts").update({ aff_amount: null }).eq("id", step.acc).eq("tenant_id", 0);
+        ctx.session.step = null;
+        await reply(`✅ <b>${escapeHtml(step.name)}</b> now uses the default commission.`, kb([btn("⬅️ Go back", "a:aff:0")]));
+        return;
+      }
+      const n = Number(raw.replace(/[$\s]/g, "").replace(",", "."));
+      if (!Number.isFinite(n) || n < 0 || n > 1000) { await reply("❌ Send a number, e.g. 10 — or reset"); return; }
+      await db.from("bot_accounts").update({ aff_amount: n }).eq("id", step.acc).eq("tenant_id", 0);
+      ctx.session.step = null;
+      await reply(`✅ <b>${escapeHtml(step.name)}</b> now earns <b>${money(n)}</b> per subscription from their link.`, kb([btn("⬅️ Go back", "a:aff:0")]));
+      return;
+    }
     case "aff_amount": {
       if (!ctx.isBoss || !bot.isMain) return;
       const n = Number(raw.replace(/[$\s]/g, "").replace(",", "."));
@@ -2011,7 +2036,8 @@ async function affiliateMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
   const { count: invited } = await db.from("bot_accounts").select("id", { count: "exact", head: true }).eq("tenant_id", 0).eq("referred_by", ctx.session.accountId);
   const { data: earn } = await db.from("affiliate_earnings").select("amount").eq("referrer_id", ctx.session.accountId);
   const total = (earn ?? []).reduce((a: number, r: any) => a + Number(r.amount), 0);
-  const amount = await affAmount(ctx.bot);
+  const { data: me } = await db.from("bot_accounts").select("aff_amount").eq("id", ctx.session.accountId).maybeSingle();
+  const amount = me?.aff_amount != null ? Number(me.aff_amount) : await affAmount(ctx.bot);
   await reply(
     `💰 <b>Start Earning By Affiliates</b>\n\n` +
     `Copy the Affiliates link and share with your friends, family, or anyone who might be interested in our services. ` +
@@ -2025,6 +2051,7 @@ async function affiliateMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
 
 async function affiliateAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
   const db = await getDb();
+  if (data === "a:aff:cu") return ask(ctx, reply, { s: "aff_cu" }, "🎯 <b>Custom commission</b>\nSend your friend's Telegram ID or @username:");
   if (data === "a:aff:amt") return ask(ctx, reply, { s: "aff_amount" }, "💵 Send the commission in $ per subscription (e.g. 5):");
   if (data === "a:aff:tog") {
     const on = (await getSetting(ctx.bot, "aff_enabled")) !== "0";
@@ -2047,13 +2074,15 @@ async function affiliateAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data
   const { data: accs } = ids.length ? await db.from("bot_accounts").select("id,username,tg_name").in("id", ids) : { data: [] as any[] };
   const name = (id: number) => { const a = (accs ?? []).find((x: any) => x.id === id); return a?.tg_name || `User #${id}`; };
   const lines = slice.map(([id, v], i) => `${p * 10 + i + 1}. ${escapeHtml(name(id))} — 👥 ${v.inv} · 🛒 ${v.sales} · 💵 ${money(v.total)}`);
+  const { data: customs } = await db.from("bot_accounts").select("id,username,tg_name,aff_amount").eq("tenant_id", 0).not("aff_amount", "is", null).limit(30);
+  const customTxt = (customs ?? []).length ? `\n\n🎯 <b>Custom commissions</b>\n${(customs ?? []).map((c: any) => `· ${escapeHtml(c.tg_name || c.username)} — ${money(Number(c.aff_amount))}`).join("\n")}` : "";
   const nav: any[] = [];
   if (p > 0) nav.push(btn("⬅️ Prev", `a:aff:${p - 1}`));
   if (p < pages - 1) nav.push(btn("Next ➡️", `a:aff:${p + 1}`));
   await reply(
     `💰 <b>Affiliates</b>\n\nStatus: <b>${on ? "🟢 On" : "🔴 Off"}</b>\nCommission: <b>${money(await affAmount(ctx.bot))}</b> per subscription\n\n` +
-    (lines.length ? `<b>Top affiliates</b> · Page ${p + 1}/${pages}\n${lines.join("\n")}` : "No affiliates yet."),
-    kb([btn("💵 Set commission", "a:aff:amt"), btn(on ? "🔴 Turn off" : "🟢 Turn on", "a:aff:tog")], ...(nav.length ? [nav] : []), [btn("⬅️ Menu", "a:home")]),
+    (lines.length ? `<b>Top affiliates</b> · Page ${p + 1}/${pages}\n${lines.join("\n")}` : "No affiliates yet.") + customTxt,
+    kb([btn("💵 Set commission", "a:aff:amt"), btn(on ? "🔴 Turn off" : "🟢 Turn on", "a:aff:tog")], [btn("🎯 Custom commission", "a:aff:cu")], ...(nav.length ? [nav] : []), [btn("⬅️ Menu", "a:home")]),
   );
 }
 
@@ -2062,11 +2091,10 @@ export async function creditAffiliate(bot: BotInfo, buyerAccountId: number, sour
   try {
     if ((await getSetting(bot, "aff_enabled")) === "0") return;
     const amount = await affAmount(bot);
-    if (amount <= 0) return;
     const db = await getDb();
     const { data: r } = await db.rpc("credit_affiliate", { p_buyer: buyerAccountId, p_amount: amount, p_source: source });
     if (r && (r as any).ok && (r as any).tg_id) {
-      await sendHtml(bot.token, Number((r as any).tg_id), `🎉 You earned <b>${money(amount)}</b> commission from <b>${escapeHtml((r as any).buyer ?? "a referral")}</b>!\n💰 New balance: <b>${money((r as any).balance)}</b>`).catch(() => {});
+      await sendHtml(bot.token, Number((r as any).tg_id), `🎉 You earned <b>${money(Number((r as any).amount ?? amount))}</b> commission from <b>${escapeHtml((r as any).buyer ?? "a referral")}</b>!\n💰 New balance: <b>${money((r as any).balance)}</b>`).catch(() => {});
     }
   } catch (e) { console.error("affiliate credit failed", e); }
 }
