@@ -105,6 +105,16 @@ function parseVariantLine(line: string): { label: string; price: number; cost: n
   return { label: m[1]!.trim().replace(/[\s:=\-–|]+$/, ""), price: Number(m[2]!.replace(",", ".")), cost: m[3] ? Number(m[3]!.replace(",", ".")) : 0 };
 }
 
+// ─── Duration shorthand: a bare number becomes a readable duration ───────────
+// "1" → "1 Day", "3" → "3 Days", "7 days" → "7 Days"
+function normalizeDuration(line: string): string {
+  const m = line.trim().match(/^(\d+)\s*(?:d|day|days)?$/i);
+  if (!m || !m[1]) return line;
+  const n = Number(m[1]);
+  if (!Number.isFinite(n) || n < 1) return line;
+  return `${n} ${n === 1 ? "Day" : "Days"}`;
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
@@ -822,9 +832,9 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     }
     case "add_vars": {
       if (!ctx.isBoss) return;
-      const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+      const lines = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map(normalizeDuration);
       if (lines.length === 1 && !parseVariantLine(lines[0]!)) {
-        return ask(ctx, reply, { s: "var_price", pid: step.pid, label: html.trim() }, PRICE_ASK);
+        return ask(ctx, reply, { s: "var_price", pid: step.pid, label: normalizeDuration(html.trim()) }, PRICE_ASK);
       }
       const parsed = lines.map(parseVariantLine);
       const bad = lines.filter((_, i) => !parsed[i]);
