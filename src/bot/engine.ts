@@ -65,7 +65,7 @@ type Step =
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
 
-type Session = { accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined };
+type Session = { accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined; identity?: { accountId: number; name: string; username: string } };
 
 export type BotInfo = {
   token: string;
@@ -157,11 +157,10 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
       for (const r of ((cpRes as any)?.data ?? []).filter((x: any) => Number(x.account_id) === Number(session.accountId))) ctx.prices.set(Number((r as any).product_id), Number((r as any).price));
     }
   }
-  // Refresh name/username/login date once per session for already logged-in users
-  // (older accounts were saved before these fields existed).
-  if (session.accountId && !(session as any).loginRecorded) {
-    (session as any).loginRecorded = true;
-    recordLogin(ctx, Number(session.accountId));
+  // Retry failed writes and refresh changed Telegram profiles, including legacy sessions.
+  const identity = session.identity;
+  if (session.accountId && (identity?.accountId !== session.accountId || identity?.name !== ctx.firstName || identity?.username !== ctx.tgUsername)) {
+    await recordLogin(ctx, Number(session.accountId), false);
   }
 
   // Button taps edit the tapped message in place (no new message per step);
@@ -313,10 +312,17 @@ async function saveEmojiTheme(ctx: Ctx) {
   await setSetting(ctx.bot, "premium_emoji", JSON.stringify(ctx.emojiOwn));
   ctx.emoji = resolveEmojiTheme(ctx.emojiOwn, ctx.emojiDefaults);
 }
-/** Remember who logged in and when (admin "Logged-in users" list). Never blocks the reply. */
-function recordLogin(ctx: Ctx, accountId: number) {
-  void getDb().then((db: any) => db.from("bot_accounts").update({ tg_id: ctx.tgId, last_login_at: new Date().toISOString(), tg_name: ctx.firstName || null, tg_username: ctx.tgUsername || null }).eq("id", accountId))
-    .then((r: any) => { if (r?.error) console.error("record login failed", r.error.message); }, () => {});
+/** Persist identity before saving the session; a failed write must remain retryable. */
+async function recordLogin(ctx: Ctx, accountId: number, login = true) {
+  try {
+    const db = await getDb();
+    const { error } = await db.from("bot_accounts").update({
+      tg_id: ctx.tgId, tg_name: ctx.firstName || null, tg_username: ctx.tgUsername || null,
+      ...(login ? { last_login_at: new Date().toISOString() } : {}),
+    }).eq("id", accountId).eq("tenant_id", ctx.bot.tenantId);
+    if (error) { console.error("record login failed", error.message); return; }
+    ctx.session.identity = { accountId, name: ctx.firstName, username: ctx.tgUsername };
+  } catch { /* Retry on the next user update. */ }
 }
 /** Telegram IDs rejected by the admin — they cannot request access again. */
 async function blockedUsers(bot: BotInfo): Promise<number[]> {
@@ -583,7 +589,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         }
         if (!acc) { await reply("⚠️ Something went wrong. Please send /start again."); return; }
         ctx.session.accountId = acc.id; ctx.session.username = acc.username;
-        recordLogin(ctx, acc.id);
+        await recordLogin(ctx, acc.id);
         await startWelcome(ctx, reply);
         return;
       }
@@ -724,8 +730,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       // Delete the password message for safety
       if (ctx.chatId && update_message_id(ctx)) await tgCall(bot.token, "deleteMessage", { chat_id: ctx.chatId, message_id: update_message_id(ctx) }).catch(() => {});
       if (!acc) { await reply("❌ Wrong password. Try again, or /cancel."); return; }
-      await db.from("bot_accounts").update({ tg_id: tgId }).eq("id", acc.id);
-      recordLogin(ctx, acc.id);
+      await recordLogin(ctx, acc.id);
       ctx.session.accountId = acc.id;
       ctx.session.username = acc.username;
       ctx.session.step = null;
@@ -1474,6 +1479,20 @@ async function usersPage(ctx: Ctx, reply: (h: string, e?: any) => any, requested
     .order("last_login_at", { ascending: false, nullsFirst: false }).order("id", { ascending: false })
     .range(page * USERS_PER_PAGE, page * USERS_PER_PAGE + USERS_PER_PAGE - 1);
   const ids = (rows ?? []).map((r: any) => r.id);
+  // Old accounts can be repaired without asking each customer to log in again.
+  // Only the ten visible rows are queried, through their own shop's bot token.
+  await Promise.all((rows ?? []).map(async (u: any) => {
+    if (u.tg_name || !u.tg_id) return;
+    try {
+      const profile = await tgCall(ctx.bot.token, "getChat", { chat_id: Number(u.tg_id) });
+      if (Number(profile?.id) !== Number(u.tg_id) || profile?.type !== "private") return;
+      const name = [profile.first_name, profile.last_name].filter(Boolean).join(" ");
+      if (!name) return;
+      const fields = { tg_name: name, tg_username: profile.username || null };
+      const { error } = await db.from("bot_accounts").update(fields).eq("id", u.id).eq("tenant_id", tid).eq("tg_id", u.tg_id);
+      if (!error) Object.assign(u, fields);
+    } catch { /* A blocked/unavailable chat must not hide the remaining users. */ }
+  }));
   // Bot subscriptions only exist in the main bot (resellers buy them there).
   const subs = new Map<number, any>();
   const paid = new Map<number, string>();
@@ -1490,8 +1509,9 @@ async function usersPage(ctx: Ctx, reply: (h: string, e?: any) => any, requested
   const blocks = (rows ?? []).map((u: any, i: number) => {
     const n = page * USERS_PER_PAGE + i + 1;
     const lines = [
-      `<b>${n}.</b> 👤 <b>${escapeHtml(u.username)}</b>`,
-      `   🏷 Name: ${escapeHtml(u.tg_name || "—")}${u.tg_username ? ` (@${escapeHtml(u.tg_username)})` : ""}`,
+      `<b>${n}.</b> 👤 Username: <b>${escapeHtml(u.username)}</b>`,
+      `   🏷 Name: ${escapeHtml(u.tg_name || "Unavailable")}`,
+      `   👤 Telegram: ${u.tg_username ? `@${escapeHtml(String(u.tg_username).replace(/^@/, ""))}` : "No public username"}`,
       `   🔐 Login: ${fmtDay(u.last_login_at ?? u.created_at)}`,
     ];
     const t = subs.get(Number(u.id));
