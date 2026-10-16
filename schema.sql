@@ -162,6 +162,7 @@ NOTIFY pgrst, 'reload schema';
 
 -- Affiliates (main bot). Idempotent.
 ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS referred_by integer;
+ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS aff_amount double precision;
 CREATE INDEX IF NOT EXISTS bot_accounts_referred_by_idx ON bot_accounts (referred_by);
 CREATE TABLE IF NOT EXISTS affiliate_earnings (id serial PRIMARY KEY, referrer_id integer NOT NULL, buyer_id integer NOT NULL, amount double precision NOT NULL, source text NOT NULL UNIQUE, created_at timestamptz NOT NULL DEFAULT now());
 ALTER TABLE affiliate_earnings ENABLE ROW LEVEL SECURITY;
@@ -169,14 +170,17 @@ CREATE INDEX IF NOT EXISTS affiliate_earnings_referrer_idx ON affiliate_earnings
 CREATE OR REPLACE FUNCTION public.credit_affiliate(p_buyer integer, p_amount double precision, p_source text)
  RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public'
 AS $function$
-DECLARE b record; r record;
+DECLARE b record; r record; amt double precision;
 BEGIN
   SELECT * INTO b FROM bot_accounts WHERE id = p_buyer AND tenant_id = 0;
   IF NOT FOUND OR b.referred_by IS NULL OR b.referred_by = b.id THEN RETURN jsonb_build_object('err', 'no referrer'); END IF;
-  INSERT INTO affiliate_earnings (referrer_id, buyer_id, amount, source) VALUES (b.referred_by, b.id, p_amount, p_source) ON CONFLICT (source) DO NOTHING;
+  SELECT COALESCE(aff_amount, p_amount) INTO amt FROM bot_accounts WHERE id = b.referred_by;
+  amt := COALESCE(amt, p_amount);
+  IF amt <= 0 THEN RETURN jsonb_build_object('err', 'zero'); END IF;
+  INSERT INTO affiliate_earnings (referrer_id, buyer_id, amount, source) VALUES (b.referred_by, b.id, amt, p_source) ON CONFLICT (source) DO NOTHING;
   IF NOT FOUND THEN RETURN jsonb_build_object('err', 'already credited'); END IF;
-  UPDATE bot_accounts SET balance = balance + p_amount WHERE id = b.referred_by AND tenant_id = 0 RETURNING * INTO r;
-  RETURN jsonb_build_object('ok', true, 'tg_id', r.tg_id, 'balance', r.balance, 'buyer', COALESCE(NULLIF(b.tg_name, ''), 'a referral'));
+  UPDATE bot_accounts SET balance = balance + amt WHERE id = b.referred_by AND tenant_id = 0 RETURNING * INTO r;
+  RETURN jsonb_build_object('ok', true, 'amount', amt, 'tg_id', r.tg_id, 'balance', r.balance, 'buyer', COALESCE(NULLIF(b.tg_name, ''), 'a referral'));
 END;
 $function$;
 REVOKE EXECUTE ON FUNCTION public.credit_affiliate(integer, double precision, text) FROM PUBLIC, anon, authenticated;
