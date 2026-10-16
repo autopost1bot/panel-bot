@@ -15,7 +15,7 @@ import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "
 import { availableNetworks, checkPayment, createPayment, getWallet, isTronAddress, NETWORK_CHAIN, NETWORK_LABEL, type CryptoPayment, type Network } from "./crypto";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
-const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Manage", stock: "📦 Stock", stats: "📊 Statistics" };
+const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Reseller", stock: "📦 Stock", stats: "📊 Statistics" };
 
 // ─── Welcome message ─────────────────────────────────────────────────────────
 // Professional default shown on /start and in the shop menu. {name} is replaced
@@ -521,7 +521,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
   await reply("📊 <b>Statistics & tools</b>", kb(
     [btn("➕ Add product", "a:add"), btn("📦 Products", "a:list")],
     [btn("📂 Categories", "a:cats"), btn("📦 Stock", "a:stock")],
-    [btn("🔧 Manage", "a:manage"), btn("🛍 View shop", "c:shop")],
+    [btn("🔧 Reseller", "a:manage"), btn("🛍 View shop", "c:shop")],
     ctx.bot.isMain ? [btn("💰 Add balance", "a:bal")] : [btn("👤 Add account", "a:acc"), btn("💰 Add balance", "a:bal")],
     [btn("📊 Orders & profit", "a:stats"), btn("📣 Broadcast", "a:bc")],
     [btn("👋 Welcome text", "a:wel"), btn(hidden ? "👁 Show prices" : "🙈 Hide prices", "a:hide")],
@@ -748,6 +748,8 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
   // Legacy keyboard labels from older bot versions (persistent keyboards survive updates)
   const low = label.toLowerCase();
   if (low.includes("admin panel") && ctx.isBoss) { ctx.session.step = null; return adminMenu(ctx, reply); }
+  // Persistent keyboards on older phones still carry the "Manage" label, so it keeps opening the same panel.
+  if (low === "manage" && ctx.isBoss) { ctx.session.step = null; return manageList(ctx, reply); }
   if (low.includes("buy keys")) { ctx.session.step = null; return ctx.isBoss ? ownerShop(ctx, reply) : shopCustomer(ctx, reply); }
   if (low.includes("log out")) {
     ctx.session.step = null; ctx.session.accountId = undefined; ctx.session.username = undefined;
@@ -2113,7 +2115,7 @@ export async function creditAffiliate(bot: BotInfo, buyerAccountId: number, sour
 const QC_GRID: [string, string][][] = [
   [["add_product", "➕ Add product"], ["products", "📦 Products"]],
   [["categories", "📂 Categories"], ["stock", "📦 Stock"]],
-  [["manage", "🔧 Manage"], ["buy", "🛍 View shop"]],
+  [["manage", "🔧 Reseller"], ["buy", "🛍 View shop"]],
   [["add_account", "👤 Add account"], ["add_balance", "💰 Add balance"]],
   [["stats", "📊 Orders & profit"], ["broadcast", "📣 Broadcast"]],
   [["welcome", "👋 Welcome text"], ["hide", "🙈 Hide prices"]],
