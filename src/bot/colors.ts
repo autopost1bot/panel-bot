@@ -34,7 +34,7 @@ export const COLOR_BUTTONS = [
   { id: "accounts", label: "Manage accounts", actions: ["a:accs", "a:m:"] },
   { id: "topup", label: "Top up", actions: ["a:mt:"] },
   { id: "deduct", label: "Deduct", actions: ["a:md:"] },
-  { id: "custom_prices", label: "Custom prices", actions: ["a:cp:", "a:cps:"] },
+  { id: "custom_prices", label: "Custom prices", actions: ["a:cp:", "a:cps:", "a:cpu"] },
   { id: "add_keys", label: "Add keys", aliases: ["Add more"], actions: ["a:k:"] },
   { id: "price", label: "Price", actions: ["a:sp:"] },
   { id: "cost", label: "Cost", actions: ["a:sc:"] },
