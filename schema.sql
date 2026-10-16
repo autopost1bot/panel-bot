@@ -176,7 +176,7 @@ BEGIN
   INSERT INTO affiliate_earnings (referrer_id, buyer_id, amount, source) VALUES (b.referred_by, b.id, p_amount, p_source) ON CONFLICT (source) DO NOTHING;
   IF NOT FOUND THEN RETURN jsonb_build_object('err', 'already credited'); END IF;
   UPDATE bot_accounts SET balance = balance + p_amount WHERE id = b.referred_by AND tenant_id = 0 RETURNING * INTO r;
-  RETURN jsonb_build_object('ok', true, 'tg_id', r.tg_id, 'balance', r.balance, 'buyer', COALESCE('@' || b.tg_username, b.username));
+  RETURN jsonb_build_object('ok', true, 'tg_id', r.tg_id, 'balance', r.balance, 'buyer', COALESCE(NULLIF(b.tg_name, ''), 'a referral'));
 END;
 $function$;
 REVOKE EXECUTE ON FUNCTION public.credit_affiliate(integer, double precision, text) FROM PUBLIC, anon, authenticated;
