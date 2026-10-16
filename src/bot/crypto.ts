@@ -123,10 +123,9 @@ async function creditAffiliateCrypto(notifyToken: string, paymentId: number, acc
     if (get("aff_enabled") === "0") return;
     const n = Number(get("aff_amount") ?? 5);
     const amount = Number.isFinite(n) && n >= 0 ? n : 5;
-    if (amount <= 0) return;
     const { data: r } = await db.rpc("credit_affiliate", { p_buyer: accountId, p_amount: amount, p_source: `crypto:${paymentId}` });
     if (r && (r as any).ok && (r as any).tg_id) {
-      await sendHtml(notifyToken, Number((r as any).tg_id), `🎉 You earned <b>${money(amount)}</b> commission from <b>${escapeHtml((r as any).buyer ?? "a referral")}</b>!\n💰 New balance: <b>${money((r as any).balance)}</b>`).catch(() => {});
+      await sendHtml(notifyToken, Number((r as any).tg_id), `🎉 You earned <b>${money(Number((r as any).amount ?? amount))}</b> commission from <b>${escapeHtml((r as any).buyer ?? "a referral")}</b>!\n💰 New balance: <b>${money((r as any).balance)}</b>`).catch(() => {});
     }
   } catch (e) { console.error("affiliate credit failed", e); }
 }
