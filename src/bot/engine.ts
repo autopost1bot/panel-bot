@@ -837,7 +837,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (!ctx.isBoss) return;
       const { data: c } = await db.from("categories").insert({ tenant_id: bot.tenantId, name: html }).select("id").single();
       if (!c) { ctx.session.step = null; await reply("❌ Could not create the category."); return; }
-      if (step.then === "add") return ask(ctx, reply, { s: "add_name", cat: Number(c.id) }, "📝 Type position name:");
+      if (step.then === "add") return ask(ctx, reply, { s: "add_name", cat: Number(c.id) }, "📝 Type product name:");
       ctx.session.step = null;
       await reply(`✅ Category created: ${html}`, kb([btn("➕ Add product here", `a:addc:${c.id}`)], [btn("📂 Categories", "a:cats")]));
       return;
@@ -1129,7 +1129,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return;
   }
   let m: RegExpMatchArray | null;
-  if ((m = data.match(/^a:addc:(\d+)$/)) && own) return ask(ctx, reply, { s: "add_name", cat: Number(m[1]) }, "📝 Type position name:");
+  if ((m = data.match(/^a:addc:(\d+)$/)) && own) return ask(ctx, reply, { s: "add_name", cat: Number(m[1]) }, "📝 Type product name:");
   if ((m = data.match(/^a:pre:(\d+):(\d+)$/)) && own) {
     const label = PRESETS.find(([d]) => d === m![2])?.[1] ?? `${m[2]} Days`;
     return ask(ctx, reply, { s: "var_price", pid: Number(m[1]), label }, PRICE_ASK);
