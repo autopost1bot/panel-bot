@@ -1740,12 +1740,23 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
     return startCryptoPayment(ctx, reply, "sub", price, data.endsWith("trc20") ? "trc20" : "bep20");
   }
+  if (data === "tsub:cancel") { ctx.session.step = null; return showMyBot(ctx, reply); }
   if (data === "tsub:token") {
+    if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    const { data: cur } = await db.from("tenant_bots").select("token").eq("owner_account_id", ctx.session.accountId).maybeSingle();
+    if (cur?.token) {
+      await reply(`⚠️ <b>Change bot token?</b>\n\nIf you continue:\n• All categories, products, durations and keys in your shop will be <b>deleted</b>.\n• Your new bot starts with an empty shop.\n• Your accounts, settings, emoji and colors stay.\n• You can change the token only <b>once every 24 hours</b>.\n\nDo you want to continue?`,
+        kb([btn("✅ Continue", "tsub:token_go")], [btn("❌ Cancel", "tsub:cancel")]));
+      return;
+    }
+    data = "tsub:token_go";
+  }
+  if (data === "tsub:token_go") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
     const wait = await tokenCooldown(db, ctx.session.accountId);
     if (wait > 0) { await reply(`⏳ You can change the bot token once every 24 hours.\nTry again in <b>${Math.ceil(wait / 3600000)}h</b>.`); return; }
     ctx.session.step = { s: "await_token" };
-    await reply(tokenHelp());
+    await reply(tokenHelp(), kb([btn("❌ Cancel", "tsub:cancel")]));
     return;
   }
   if (data === "tsub:buy") {
