@@ -184,3 +184,8 @@ GRANT ALL ON affiliate_earnings TO service_role;
 GRANT ALL ON SEQUENCE affiliate_earnings_id_seq TO service_role;
 GRANT EXECUTE ON FUNCTION public.credit_affiliate(integer, double precision, text) TO service_role;
 NOTIFY pgrst, 'reload schema';
+
+-- Random unique affiliate codes. Idempotent.
+ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS ref_code text;
+CREATE UNIQUE INDEX IF NOT EXISTS bot_accounts_ref_code_idx ON bot_accounts (ref_code);
+NOTIFY pgrst, 'reload schema';
