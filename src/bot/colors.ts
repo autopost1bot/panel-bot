@@ -5,7 +5,7 @@ export const COLOR_BUTTONS = [
   { id: "buy", label: "Buy keys", aliases: ["View shop"], actions: ["c:shop"] },
   { id: "account", label: "Account", actions: ["c:me"] },
   { id: "logout", label: "Log out" },
-  { id: "manage", label: "Manage", aliases: ["Admin Panel"], actions: ["a:manage"] },
+  { id: "manage", label: "Reseller", aliases: ["Admin Panel", "Manage"], actions: ["a:manage"] },
   { id: "login", label: "Login" },
   { id: "buy_one", label: "Buy one", actions: ["c:buy:"] },
   { id: "buy_multiple", label: "Buy multiple", actions: ["c:bm:"] },
