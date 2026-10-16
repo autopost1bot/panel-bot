@@ -731,7 +731,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
   if (matchesMenu(L.acc)) {
     ctx.session.step = null;
     const acc = await getAccount(ctx);
-    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb(...(ctx.bot.isMain ? [[btn("💳 Add balance with Crypto", "pay:top")]] : []), [btn("📜 Purchase History", "c:orders")]));
+    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb(...(ctx.bot.isMain ? [[btn("💳 Add balance with Crypto", "pay:top")]] : []), [btn("📜 Purchase History", "c:orders")], [btn("⬅️ Go back", "c:home")]));
     return;
   }
   if (matchesMenu(L.out)) {
@@ -756,7 +756,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
   if (low.includes("my orders") || low === "account") {
     ctx.session.step = null;
     const acc = await getAccount(ctx);
-    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb(...(ctx.bot.isMain ? [[btn("💳 Add balance with Crypto", "pay:top")]] : []), [btn("📜 Purchase History", "c:orders")]));
+    await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb(...(ctx.bot.isMain ? [[btn("💳 Add balance with Crypto", "pay:top")]] : []), [btn("📜 Purchase History", "c:orders")], [btn("⬅️ Go back", "c:home")]));
     return;
   }
 
@@ -815,7 +815,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (!ctx.isBoss) return;
       const tag = raw === "-" ? null : emojiTag(text, entities);
       if (raw !== "-" && !tag) {
-        await reply("❌ Send one Premium emoji from your emoji picker, or - to remove it.");
+        await reply("❌ Send one Premium emoji from your emoji picker, or - to remove it.", kb([btn("✖️ Cancel", "x:cancel")]));
         return;
       }
       if (step.s === "emoji_icon") {
@@ -829,7 +829,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         await saveEmojiTheme(ctx);
       } else {
         const { data: item } = await db.from(step.kind).select("name").eq("tenant_id", bot.tenantId).eq("id", step.id).maybeSingle();
-        if (!item) { ctx.session.step = null; await reply("❌ Item not found."); return; }
+        if (!item) { ctx.session.step = null; await reply("❌ Item not found.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
         const { error } = await db.from(step.kind).update({ name: replaceNameIcon(item.name, tag) }).eq("tenant_id", bot.tenantId).eq("id", step.id);
         if (error) throw error;
       }
@@ -840,20 +840,20 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     // ── Login (username + 8-digit password)
     case "login_user": {
       const uname = raw.toLowerCase();
-      if (!/^[a-z0-9_.]{3,32}$/.test(uname)) { await reply("❌ Invalid username. Send the username given by the seller."); return; }
+      if (!/^[a-z0-9_.]{3,32}$/.test(uname)) { await reply("❌ Invalid username. Send the username given by the seller.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: acc } = await db.from("bot_accounts").select("id").eq("tenant_id", bot.tenantId).eq("username", uname).maybeSingle();
-      if (!acc) { await reply("❌ Unknown username. Try again."); return; }
+      if (!acc) { await reply("❌ Unknown username. Try again.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       ctx.session.step = { s: "login_pass", username: uname };
       await reply("🔑 Now send your <b>password</b>:", kb([btn("✖️ Cancel", "x:cancel")]));
       return;
     }
     case "login_pass": {
-      if (!/^\S{8,32}$/.test(raw)) { await reply("❌ Password must be 8–32 characters (letters, numbers, symbols — no spaces)."); return; }
+      if (!/^\S{8,32}$/.test(raw)) { await reply("❌ Password must be 8–32 characters (letters, numbers, symbols — no spaces).", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const hash = await hashPassword(bot.tenantId, step.username, raw);
       const { data: acc } = await db.from("bot_accounts").select("*").eq("tenant_id", bot.tenantId).eq("username", step.username).eq("password_hash", hash).maybeSingle();
       // Delete the password message for safety
       if (ctx.chatId && update_message_id(ctx)) await tgCall(bot.token, "deleteMessage", { chat_id: ctx.chatId, message_id: update_message_id(ctx) }).catch(() => {});
-      if (!acc) { await reply("❌ Wrong password. Try again, or /cancel."); return; }
+      if (!acc) { await reply("❌ Wrong password. Try again, or /cancel.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       await recordLogin(ctx, acc.id);
       ctx.session.accountId = acc.id;
       ctx.session.username = acc.username;
@@ -864,7 +864,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
 
     // ── Shopping
     case "buy_qty": {
-      if (!(Number.isInteger(num) && num >= 1 && num <= 100)) { await reply("❌ Send a number from 1 to 100."); return; }
+      if (!(Number.isInteger(num) && num >= 1 && num <= 100)) { await reply("❌ Send a number from 1 to 100.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       ctx.session.step = null;
       return buy(ctx, reply, step.pid, num);
     }
@@ -872,7 +872,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     // ── Crypto top-up amount
     case "pay_amount": {
       if (!bot.isMain || !ctx.session.accountId) { ctx.session.step = null; return; }
-      if (!(num > 0 && num <= 100000)) { await reply("❌ Send an amount between 1 and 100000 (e.g. 50)."); return; }
+      if (!(num > 0 && num <= 100000)) { await reply("❌ Send an amount between 1 and 100000 (e.g. 50).", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       ctx.session.step = null;
       return startCryptoPayment(ctx, reply, "topup", num, step.net ?? "bep20");
     }
@@ -881,7 +881,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     case "add_name": {
       if (!ctx.isBoss) return;
       const { data: p } = await db.from("products").insert({ tenant_id: bot.tenantId, name: html, category_id: step.cat }).select("id").single();
-      if (!p) { ctx.session.step = null; await reply("❌ Could not create the product."); return; }
+      if (!p) { ctx.session.step = null; await reply("❌ Could not create the product.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       return variantPrompt(ctx, reply, Number(p.id));
     }
     case "add_vars": {
@@ -914,10 +914,10 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     case "cat_new": {
       if (!ctx.isBoss) return;
       const { data: c } = await db.from("categories").insert({ tenant_id: bot.tenantId, name: html }).select("id").single();
-      if (!c) { ctx.session.step = null; await reply("❌ Could not create the category."); return; }
+      if (!c) { ctx.session.step = null; await reply("❌ Could not create the category.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       if (step.then === "add") return ask(ctx, reply, { s: "add_name", cat: Number(c.id) }, "📝 Type product name:");
       ctx.session.step = null;
-      await reply(`✅ Category created: ${html}`, kb([btn("➕ Add product here", `a:addc:${c.id}`)], [btn("📂 Categories", "a:cats")]));
+      await reply(`✅ Category created: ${html}`, kb([btn("➕ Add product here", `a:addc:${c.id}`)], [btn("📂 Categories", "a:cats")], [btn("⬅️ Menu", "a:home")]));
       return;
     }
     case "cat_name": {
@@ -962,20 +962,20 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     case "acc_user": {
       if (!ctx.isBoss) return;
       const uname = raw.toLowerCase();
-      if (!/^[a-z0-9_.]{3,32}$/.test(uname)) { await reply("❌ That username can't be used. Send 3–32 characters: letters, numbers, <code>_</code> or <code>.</code>"); return; }
+      if (!/^[a-z0-9_.]{3,32}$/.test(uname)) { await reply("❌ That username can't be used. Send 3–32 characters: letters, numbers, <code>_</code> or <code>.</code>", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: ex } = await db.from("bot_accounts").select("id").eq("tenant_id", bot.tenantId).eq("username", uname).maybeSingle();
-      if (ex) { await reply("❌ That username is taken. Send another one."); return; }
+      if (ex) { await reply("❌ That username is taken. Send another one.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       ctx.session.step = { s: "acc_pass", username: uname };
       await reply(`🔐 Now create a <b>password</b> for <code>${escapeHtml(uname)}</code>:\n\n8–32 characters — letters, numbers or symbols, no spaces.`, kb([btn("✖️ Cancel", "x:cancel")]));
       return;
     }
     case "acc_pass": {
       if (!ctx.isBoss) return;
-      if (!/^\S{8,32}$/.test(raw)) { await reply("❌ Password must be 8–32 characters (letters, numbers, symbols — no spaces)."); return; }
+      if (!/^\S{8,32}$/.test(raw)) { await reply("❌ Password must be 8–32 characters (letters, numbers, symbols — no spaces).", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const hash = await hashPassword(bot.tenantId, step.username, raw);
       const { data: acc } = await db.from("bot_accounts").insert({ tenant_id: bot.tenantId, username: step.username, password_hash: hash }).select("id").single();
       ctx.session.step = null;
-      if (!acc) { await reply("❌ Could not create the account."); return; }
+      if (!acc) { await reply("❌ Could not create the account.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const creds = encodeURIComponent(`Username: ${step.username}\nPassword: ${raw}`);
       await reply(`✅ Account ${escapeHtml(step.username)}:${escapeHtml(raw)} added!`, kb(
         [urlBtn("✉️ Send credentials", `https://t.me/share/url?url=${creds}`)],
@@ -987,9 +987,9 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (!ctx.isBoss) return;
       const [uname, amt] = raw.split(/\s+/);
       const a = Number(amt);
-      if (!uname || !Number.isFinite(a) || a === 0) { await reply("❌ Format: <code>USERNAME AMOUNT</code>"); return; }
+      if (!uname || !Number.isFinite(a) || a === 0) { await reply("❌ Format: <code>USERNAME AMOUNT</code>", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: acc } = await db.from("bot_accounts").select("*").eq("tenant_id", bot.tenantId).eq("username", uname.toLowerCase()).maybeSingle();
-      if (!acc) { await reply("❌ Unknown username."); return; }
+      if (!acc) { await reply("❌ Unknown username.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: c } = await db.from("bot_accounts").update({ balance: Number(acc.balance) + a }).eq("id", acc.id).select("balance, tg_id").single();
       ctx.session.step = null;
       if (!c) { await reply("❌ Update failed.", kb([btn("⬅️ Menu", "a:home")])); return; }
@@ -1042,7 +1042,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         const { data: a } = await db.from("bot_accounts").select("tg_id").eq("tenant_id", 0).ilike("tg_username", q).not("tg_id", "is", null).limit(1).maybeSingle();
         tg = a?.tg_id ? Number(a.tg_id) : null;
       }
-      if (tg === null) { await reply("❌ User not found. Send their Telegram ID (numbers) or @username."); return; }
+      if (tg === null) { await reply("❌ User not found. Send their Telegram ID (numbers) or @username.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: gone } = await db.from("bot_accounts").update({ tg_id: null }).eq("tenant_id", 0).eq("tg_id", tg).select("id");
       await db.from("bot_sessions").delete().eq("tenant_id", 0).eq("tg_id", tg);
       ctx.session.step = null;
@@ -1056,7 +1056,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       let qb = db.from("bot_accounts").select("id,username,tg_name").eq("tenant_id", 0).not("tg_id", "is", null);
       qb = /^\d{3,20}$/.test(q) ? qb.eq("tg_id", Number(q)) : qb.ilike("tg_username", q);
       const { data: a } = await qb.limit(1).maybeSingle();
-      if (!a) { await reply("❌ User not found. Send their Telegram ID or @username (they must have started the bot)."); return; }
+      if (!a) { await reply("❌ User not found. Send their Telegram ID or @username (they must have started the bot).", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const name = a.tg_name || a.username;
       return ask(ctx, reply, { s: "aff_ca", acc: a.id, name }, `🎯 Send the commission in $ for <b>${escapeHtml(name)}</b> (e.g. 10).\nSend <b>reset</b> to use the default again.`);
     }
@@ -1069,7 +1069,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         return;
       }
       const n = Number(raw.replace(/[$\s]/g, "").replace(",", "."));
-      if (!Number.isFinite(n) || n < 0 || n > 1000) { await reply("❌ Send a number, e.g. 10 — or reset"); return; }
+      if (!Number.isFinite(n) || n < 0 || n > 1000) { await reply("❌ Send a number, e.g. 10 — or reset", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       await db.from("bot_accounts").update({ aff_amount: n }).eq("id", step.acc).eq("tenant_id", 0);
       ctx.session.step = null;
       await reply(`✅ <b>${escapeHtml(step.name)}</b> now earns <b>${money(n)}</b> per subscription from their link.`, kb([btn("⬅️ Go back", "a:aff:0")]));
@@ -1078,7 +1078,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     case "aff_amount": {
       if (!ctx.isBoss || !bot.isMain) return;
       const n = Number(raw.replace(/[$\s]/g, "").replace(",", "."));
-      if (!Number.isFinite(n) || n < 0 || n > 1000) { await reply("❌ Send a number, e.g. 5"); return; }
+      if (!Number.isFinite(n) || n < 0 || n > 1000) { await reply("❌ Send a number, e.g. 5", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       await setSetting(bot, "aff_amount", String(n));
       ctx.session.step = null;
       await reply(`✅ Commission set to <b>${money(n)}</b> per subscription.`, kb([btn("⬅️ Go back", "a:aff:0")]));
@@ -1087,7 +1087,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     case "support": {
       if (!ctx.isBoss) return;
       const u = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
-      if (!/^[A-Za-z0-9_]{4,32}$/.test(u)) { await reply("❌ Send a valid Telegram username, e.g. @YOUR_TELEGRAM"); return; }
+      if (!/^[A-Za-z0-9_]{4,32}$/.test(u)) { await reply("❌ Send a valid Telegram username, e.g. @YOUR_TELEGRAM", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       await setSetting(bot, "support_username", u);
       ctx.session.step = null;
       await reply(`✅ Support username saved: @${escapeHtml(u)}\nThe 💬 Support button now opens this chat.`, kb([btn("⬅️ Go back", "a:sup")]));
@@ -1102,11 +1102,11 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     }
     case "await_token": {
       if (!bot.isMain) return;
-      if (!TOKEN_RE.test(raw)) { await reply("❌ That doesn't look like a bot token. Copy the full token from @BotFather (like <code>123456:ABC...</code>), or send /cancel."); return; }
+      if (!TOKEN_RE.test(raw)) { await reply("❌ That doesn't look like a bot token. Copy the full token from @BotFather (like <code>123456:ABC...</code>), or send /cancel.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const me = await tgCall(raw, "getMe").catch(() => null);
-      if (!me) { await reply("❌ Telegram rejected this token. Check it in @BotFather and send again."); return; }
+      if (!me) { await reply("❌ Telegram rejected this token. Check it in @BotFather and send again.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: clash } = await db.from("tenant_bots").select("id").eq("token", raw).maybeSingle();
-      if (clash) { await reply("❌ This bot is already used by another account."); return; }
+      if (clash) { await reply("❌ This bot is already used by another account.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: prev } = await db.from("tenant_bots").select("id, token").eq("owner_account_id", ctx.session.accountId!).maybeSingle();
       const changing = !!(prev && prev.token);
       if (changing && (await tokenCooldown(db, ctx.session.accountId!)) > 0) { ctx.session.step = null; await reply("⏳ You can change the bot token once every 24 hours."); return; }
@@ -1147,7 +1147,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (ak) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ak[1])); }
   const ap = own ? data.match(/^x:ap:(\d+)$/) : null;
   if (ap) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ap[1])); }
-  if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : shopMenu(ctx, reply); }
+  if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : ctx.session.accountId ? shopMenu(ctx, reply) : handleText(ctx, reply, "/start", [], save); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
 
   // ── New-user approval (admin only)
@@ -1855,11 +1855,12 @@ async function showMyBot(ctx: Ctx, reply: (h: string, e?: any) => any) {
   if (!t) {
     await reply(
       `🤖 <b>Make your own bot</b>\n\nLaunch your own reseller bot in minutes — you are the admin:\n• Add products, set prices & costs\n• Load stock keys and sell instantly\n• Manage accounts & balances\n• Track orders & profit, broadcast to resellers\n• Premium emoji supported automatically\n\n💵 Price: <b>${money(price)}</b> / ${days} days (paid from your balance)`,
-      kb([btn(`🚀 Make my bot — ${money(price)}`, "tsub:buy")]));
+      kb([btn(`🚀 Make my bot — ${money(price)}`, "tsub:buy")], [btn("⬅️ Go back", "c:home")]));
     return;
   }
   const rows: any[][] = [[btn(`🔄 Renew +${days} days — ${money(price)}`, "tsub:buy")]];
   if (active) rows.push([btn(t.token ? "🔑 Change bot token" : "🔑 Send bot token", "tsub:token")]);
+  rows.push([btn("⬅️ Go back", "c:home")]);
   await reply(
     `🤖 <b>Your own bot</b>\n\nStatus: ${active ? "✅ Active" : "⛔️ Expired"}\nBot: ${t.bot_username ? "@" + escapeHtml(t.bot_username) : "— (token not added yet)"}\nValid until: <b>${fmtDate(t.expires_at)}</b>`,
     kb(...rows));
@@ -1956,7 +1957,7 @@ async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, dat
     const nets = await availableNetworks();
     if (!nets.length) { await reply("⚠️ Crypto payments are not available yet. Please ask the admin."); return; }
     if (nets.length === 1) return ask(ctx, reply, { s: "pay_amount", net: nets[0] }, `💳 How much do you want to add via USDT (${NETWORK_LABEL[nets[0]]})? Send the amount in $ (e.g. 50):`);
-    await reply("💳 <b>Add balance</b>\n\nChoose the USDT network:", kb(...nets.map(n => [btn(`USDT (${NETWORK_LABEL[n]})`, `pay:top:${n}`)])));
+    await reply("💳 <b>Add balance</b>\n\nChoose the USDT network:", kb(...nets.map(n => [btn(`USDT (${NETWORK_LABEL[n]})`, `pay:top:${n}`)]), [btn("❌ Cancel", "x:cancel")]));
     return;
   }
   if ((m = data.match(/^pay:top:(bep20|trc20)$/))) {
