@@ -2116,14 +2116,14 @@ export async function creditAffiliate(bot: BotInfo, buyerAccountId: number, sour
 const QC_GRID: [string, string][][] = [
   [["add_product", "➕ Add product"], ["products", "📦 Products"]],
   [["categories", "📂 Categories"], ["stock", "📦 Stock"]],
-  [["manage", "🔧 Reseller"], ["buy", "🛍 View shop"]],
+  [["manage", "🔧 Reseller"], ["view_shop", "🛍 View shop"]],
   [["add_account", "👤 Add account"], ["add_balance", "💰 Add balance"]],
   [["stats", "📊 Orders & profit"], ["broadcast", "📣 Broadcast"]],
   [["welcome", "👋 Welcome text"], ["hide", "🙈 Hide prices"]],
   [["support", "💬 Support username"], ["users", "👥 Logged-in users"]],
   [["emoji", "✨ Premium emoji"], ["colors", "🎨 Button colors"]],
   [["tenants", "🤖 Reseller bots"], ["affiliates", "💰 Affiliates"]],
-  [["custom_prices", "💲 Custom prices"]],
+  [["buy", "🔑 Buy keys"], ["custom_prices", "💲 Custom prices"]],
   [["remove_user", "🚫 Remove user"]],
 ];
 function qcGrid(ctx: Ctx): [string, string][][] {
