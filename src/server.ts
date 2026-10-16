@@ -3,7 +3,7 @@ import { setDefaultResultOrder } from "node:dns";
 // Prefer IPv4: VPS IPv6 routes to Telegram are often slow and stall every request.
 setDefaultResultOrder("ipv4first");
 import { getDb } from "./bot/db";
-import { handleUpdate } from "./bot/engine";
+import { enqueueUpdate, drainUpdates, drainOutbox } from "./bot/reliability";
 import { sendHtml, tgCall, webhookSecret } from "./bot/tg";
 import { scanPayments } from "./bot/crypto";
 
@@ -21,7 +21,8 @@ async function adminIds(): Promise<number[]> {
   const parse = (v: string) => v.split(",").map((x) => Number(x.trim())).filter((n) => Number.isFinite(n) && n > 0);
   const ids = new Set(parse(process.env["ADMIN_TG_IDS"] ?? ""));
   const db = await getDb();
-  const { data: s } = await db.from("bot_settings").select("value").eq("tenant_id", 0).eq("key", "admin_tg_ids").maybeSingle();
+  const { data: s, error } = await db.from("bot_settings").select("value").eq("tenant_id", 0).eq("key", "admin_tg_ids").maybeSingle();
+  if (error) throw error;
   for (const n of parse(String(s?.value ?? ""))) ids.add(n);
   adminCache = { at: Date.now(), ids: [...ids] };
   return adminCache.ids;
@@ -54,28 +55,31 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/webhook") {
       if (secret !== mainSecret) { res.writeHead(401); res.end(); return; }
       const update = await readJson(req);
-      ok(); // answer Telegram immediately, process after
-      if (update) handleUpdate({ token: "main", tenantId: 0, ownerTgId: 0, isMain: true, adminTgIds: await adminIds() }, update)
-        .catch((e) => console.error("main bot update failed", e));
+      if (update) await enqueueUpdate(0, update);
+      ok(); // acknowledged only after durable persistence
+      void drainUpdates(resolveBot).catch(() => console.error("Update worker failed"));
       return;
     }
 
     const m = url.pathname.match(/^\/tenant\/(.+)$/);
     if (m) {
-      const token = decodeURIComponent(m[1]!);
+      const encoded = m[1];
+      if (!encoded) { res.writeHead(400); res.end(); return; }
+      const token = decodeURIComponent(encoded);
       if (!TOKEN_RE.test(token) || secret !== (await cachedSecret(token))) { res.writeHead(401); res.end(); return; }
       const update = await readJson(req);
-      ok();
-      if (!update) return;
+      if (!update) { ok(); return; }
       let t = tenantCache.get(token);
       if (!t || Date.now() - t.at > 60_000) {
         const db = await getDb();
-        const { data } = await db.from("tenant_bots").select("id, owner_tg_id").eq("token", token).maybeSingle();
+        const { data, error } = await db.from("tenant_bots").select("id, owner_tg_id").eq("token", token).maybeSingle();
+        if (error) throw error;
         t = data ? { at: Date.now(), id: data.id, owner_tg_id: data.owner_tg_id } : undefined;
         if (t) tenantCache.set(token, t); else tenantCache.delete(token);
       }
-      if (t) handleUpdate({ token, tenantId: t.id, ownerTgId: Number(t.owner_tg_id), isMain: false, adminTgIds: [] }, update)
-        .catch((e) => console.error("reseller bot update failed", e));
+      if (t) await enqueueUpdate(t.id, update);
+      ok();
+      void drainUpdates(resolveBot).catch(() => console.error("Update worker failed"));
       return;
     }
     res.writeHead(404); res.end();
@@ -84,6 +88,15 @@ const server = createServer(async (req, res) => {
     if (!res.headersSent) { res.writeHead(500); res.end(); }
   }
 });
+
+async function resolveBot(tenantId: number) {
+  if (tenantId === 0) return { token: "main", tenantId: 0, ownerTgId: 0, isMain: true, adminTgIds: await adminIds() };
+  const db = await getDb();
+  const { data, error } = await db.from("tenant_bots").select("token,owner_tg_id").eq("id", tenantId).maybeSingle();
+  if (error) throw error;
+  if (!data?.token) return null;
+  return { token: data.token, tenantId, ownerTgId: Number(data.owner_tg_id), isMain: false, adminTgIds: [] };
+}
 
 // Hourly: remind owners about expiring subscriptions and mark expired ones.
 async function expiryCheck() {
@@ -127,6 +140,11 @@ server.listen(PORT, async () => {
       }).catch((e: unknown) => console.error("reseller webhook failed", e));
     }
   } catch (e) { console.error("webhook setup failed", e); }
+  const recover = () => drainUpdates(resolveBot).catch(() => console.error("Update recovery failed"));
+  const deliverPending = () => drainOutbox(resolveBot).catch(() => console.error("Delivery recovery failed"));
+  void recover();
+  setInterval(recover, 1000);
+  setInterval(deliverPending, 30_000);
   void expiryCheck();
   setInterval(expiryCheck, 60 * 60 * 1000);
   // Every minute: verify incoming BEP20 USDT payments automatically.

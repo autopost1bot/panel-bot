@@ -6,6 +6,7 @@
 import { getDb } from "./db";
 import { sendHtml, money, escapeHtml } from "./tg";
 import { parseEmojiTheme, themeHtml } from "./emoji";
+import { affiliateNotice, deliver } from "./reliability";
 
 export const USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"; // USDT on BSC, 18 decimals
 const TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
@@ -67,12 +68,14 @@ export type CryptoPayment = {
  *  identifiable. Retries with a new suffix if the amount is taken. */
 export async function createPayment(accountId: number, tgId: number, kind: "topup" | "sub", baseAmount: number, network: Network = "bep20"): Promise<CryptoPayment | null> {
   const db = await getDb();
-  const { data: pending } = await db.from("crypto_payments").select("amount").eq("status", "pending").eq("network", network);
+  const { data: pending, error: readError } = await db.from("crypto_payments").select("amount").eq("status", "pending").eq("network", network);
+  if (readError) throw readError;
   const taken = new Set((pending ?? []).map((p: any) => Number(p.amount)));
   for (let attempt = 0; attempt < 20; attempt++) {
     const cents = Math.floor(Math.random() * 99) + 1; // .01 – .99
     const amount = Math.floor(baseAmount) + cents / 100;
     if (taken.has(amount)) continue;
+    taken.add(amount);
     const { data, error } = await db.from("crypto_payments")
       .insert({ tenant_id: 0, account_id: accountId, tg_id: tgId, kind, amount, status: "pending", network })
       .select("*").single();
@@ -99,7 +102,7 @@ export async function availableNetworks(): Promise<Network[]> {
   return out;
 }
 
-async function notifyPaid(notifyToken: string, tgId: number, r: any, network: Network) {
+async function notifyPaid(notifyToken: string, tgId: number, r: any, network: Network, paymentId: number) {
   const label = `USDT (${NETWORK_LABEL[network]})`;
   const text = r.kind === "sub"
     ? `✅ <b>Payment received!</b>\n\n💳 ${money(r.amount)} ${label} confirmed.\n🤖 Your bot subscription is active until <b>${escapeHtml(String(r.expires_at ?? "").slice(0, 10))}</b>.`
@@ -111,23 +114,8 @@ async function notifyPaid(notifyToken: string, tgId: number, r: any, network: Ne
     const { data } = await db.from("bot_settings").select("value").eq("tenant_id", 0).eq("key", "premium_emoji").maybeSingle();
     themed = themeHtml(text, parseEmojiTheme(data?.value ?? null));
   } catch { /* keep plain emoji */ }
-  await sendHtml(notifyToken, tgId, themed).catch(() => {});
-}
-
-/** Affiliate commission for a crypto-paid subscription (once per payment id). */
-async function creditAffiliateCrypto(notifyToken: string, paymentId: number, accountId: number) {
-  try {
-    const db = await getDb();
-    const { data: rows } = await db.from("bot_settings").select("key,value").eq("tenant_id", 0).in("key", ["aff_enabled", "aff_amount"]);
-    const get = (k: string) => (rows ?? []).find((r: any) => r.key === k)?.value;
-    if (get("aff_enabled") === "0") return;
-    const n = Number(get("aff_amount") ?? 5);
-    const amount = Number.isFinite(n) && n >= 0 ? n : 5;
-    const { data: r } = await db.rpc("credit_affiliate", { p_buyer: accountId, p_amount: amount, p_source: `crypto:${paymentId}` });
-    if (r && (r as any).ok && (r as any).tg_id) {
-      await sendHtml(notifyToken, Number((r as any).tg_id), `🎉 You earned <b>${money(Number((r as any).amount ?? amount))}</b> commission from <b>${escapeHtml((r as any).buyer ?? "a referral")}</b>!\n💰 New balance: <b>${money((r as any).balance)}</b>`).catch(() => {});
-    }
-  } catch (e) { console.error("affiliate credit failed", e); }
+  await deliver({ token: notifyToken, tenantId: 0 }, tgId, themed, {}, `payment:${paymentId}`);
+  await affiliateNotice({ token: notifyToken, tenantId: 0 }, r.affiliate, `crypto:${paymentId}`);
 }
 
 /** TRC20 pass: incoming USDT transfers to the Tron wallet since the oldest
@@ -137,41 +125,85 @@ async function scanTrc20(waiting: any[], notifyToken: string): Promise<{ scanned
   if (!wallet || !waiting.length) return { scanned: 0, paid: 0 };
   const db = await getDb();
   const since = Math.min(...waiting.map((p: any) => new Date(p.created_at).getTime())) - 60_000;
-  const url = `${TRONGRID}/v1/accounts/${wallet}/transactions/trc20?only_to=true&only_confirmed=true&limit=200&contract_address=${TRC20_USDT}&min_timestamp=${since}`;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  const j: any = await res.json();
-  const txs: any[] = Array.isArray(j?.data) ? j.data : [];
-  let paid = 0;
+  const baseUrl = new URL(`${TRONGRID}/v1/accounts/${wallet}/transactions/trc20`);
+  baseUrl.search = new URLSearchParams({ only_to: "true", only_confirmed: "true", limit: "200", contract_address: TRC20_USDT, min_timestamp: String(since) }).toString();
+  let next: string | undefined = baseUrl.toString();
+  let paid = 0, scanned = 0;
   const used = new Set<number>();
-  for (const tx of txs) {
-    if (String(tx.to ?? "") !== wallet) continue;
-    const dec = Number(tx.token_info?.decimals ?? 6);
-    const amount = Number(tx.value) / 10 ** dec;
-    const ts = Number(tx.block_timestamp ?? 0);
-    const match = waiting.find((p: any) => !used.has(p.id) && Math.abs(Number(p.amount) - amount) < 1e-9 && ts >= new Date(p.created_at).getTime() - 60_000);
-    if (!match) continue;
-    const { data: r } = await db.rpc("fulfill_crypto_payment", { p_id: match.id, p_tx: tx.transaction_id });
-    if (!r || (r as any).err) continue;
-    used.add(match.id);
-    paid++;
-    await notifyPaid(notifyToken, Number(match.tg_id), r, "trc20");
-    if ((r as any).kind === "sub") await creditAffiliateCrypto(notifyToken, match.id, Number(match.account_id));
+  const visited = new Set<string>();
+  while (next) {
+    if (visited.has(next)) throw new Error("Repeated TRC20 page");
+    visited.add(next);
+    const res = await fetch(next, { headers: { Accept: "application/json" } });
+    if (res.ok === false) throw new Error(`TRC20 request failed: ${res.status}`);
+    const j: any = await res.json();
+    if (!Array.isArray(j?.data)) throw new Error("Invalid TRC20 response");
+    const txs: any[] = j.data;
+    scanned += txs.length;
+    for (const tx of txs) {
+      if (String(tx.to ?? "") !== wallet) continue;
+      const dec = Number(tx.token_info?.decimals ?? 6);
+      const amount = Number(tx.value) / 10 ** dec;
+      const ts = Number(tx.block_timestamp ?? 0);
+      const match = waiting.find((p: any) => !used.has(p.id) && Math.abs(Number(p.amount) - amount) < 1e-9 && ts >= new Date(p.created_at).getTime() - 60_000);
+      if (!match) continue;
+      const { error: queueError } = await db.from("bot_payment_transfers").upsert({ payment_id: match.id, tx_hash: tx.transaction_id }, { onConflict: "payment_id", ignoreDuplicates: true });
+      if (queueError) throw queueError;
+      const { data: r, error } = await db.rpc("fulfill_crypto_payment", { p_id: match.id, p_tx: tx.transaction_id });
+      if (error) throw error;
+      if (!r || r.err) continue;
+      used.add(match.id);
+      paid++;
+      await notifyPaid(notifyToken, Number(match.tg_id), r, "trc20", match.id);
+      await db.from("bot_payment_transfers").update({ done: true }).eq("payment_id", match.id);
+    }
+    const fingerprint = j.meta?.fingerprint;
+    if (fingerprint) {
+      const pageUrl = new URL(baseUrl);
+      pageUrl.searchParams.set("fingerprint", String(fingerprint));
+      next = pageUrl.toString();
+    } else if (j.meta?.links?.next) {
+      const pageUrl = new URL(j.meta.links.next, TRONGRID);
+      if (pageUrl.origin !== TRONGRID || pageUrl.pathname !== baseUrl.pathname) throw new Error("Invalid TRC20 next page");
+      next = pageUrl.toString();
+    } else next = undefined;
   }
-  return { scanned: txs.length, paid };
+  return { scanned, paid };
 }
 
 /** One scan pass: fetch new USDT transfers to the wallet, fulfill matching
  *  pending payments, expire stale ones. Safe to call every minute. */
 export async function scanPayments(notifyToken = "main"): Promise<{ scanned: number; paid: number }> {
   const db = await getDb();
-  const { data: pending } = await db.from("crypto_payments").select("*").eq("status", "pending").order("id");
+  const { data: pending, error: pendingError } = await db.from("crypto_payments").select("*").eq("status", "pending").order("id");
+  if (pendingError) throw pendingError;
+  const { data: retries, error: retryError } = await db.from("bot_payment_transfers").select("*").eq("done", false);
+  if (retryError) throw retryError;
+  for (const retry of retries ?? []) {
+    const { data: p, error: readError } = await db.from("crypto_payments").select("*").eq("id", retry.payment_id).maybeSingle();
+    if (readError) throw readError;
+    if (!p) continue;
+    if (p.status === "paid") {
+      // A crash after commit must still restore the confirmation/commission notice.
+      const { data: result, error } = await db.rpc("payment_delivery_result", { p_id: p.id });
+      if (error) throw error;
+      if (!result) continue;
+      await notifyPaid(notifyToken, Number(p.tg_id), result, p.network ?? "bep20", p.id);
+    } else {
+      const { data: result, error } = await db.rpc("fulfill_crypto_payment", { p_id: p.id, p_tx: retry.tx_hash });
+      if (error || !result || result.err) continue;
+      await notifyPaid(notifyToken, Number(p.tg_id), result, p.network ?? "bep20", p.id);
+    }
+    await db.from("bot_payment_transfers").update({ done: true }).eq("payment_id", p.id);
+  }
+  const retryIds = new Set((retries ?? []).map((r: any) => r.payment_id));
   const now = Date.now();
   for (const p of pending ?? []) {
-    if (now - new Date(p.created_at).getTime() > PAYMENT_TTL_MS) {
+    if (!retryIds.has(p.id) && now - new Date(p.created_at).getTime() > PAYMENT_TTL_MS) {
       await db.from("crypto_payments").update({ status: "expired" }).eq("id", p.id).eq("status", "pending");
     }
   }
-  const live = (pending ?? []).filter((p: any) => now - new Date(p.created_at).getTime() <= PAYMENT_TTL_MS);
+  const live = (pending ?? []).filter((p: any) => !retryIds.has(p.id) && now - new Date(p.created_at).getTime() <= PAYMENT_TTL_MS);
   const tron = live.filter((p: any) => p.network === "trc20");
   const waiting = live.filter((p: any) => (p.network ?? "bep20") === "bep20");
   const t = await scanTrc20(tron, notifyToken).catch((e) => { console.error("trc20 scan failed", e); return { scanned: 0, paid: 0 }; });
@@ -182,28 +214,38 @@ export async function scanPayments(notifyToken = "main"): Promise<{ scanned: num
   const { data: s } = await db.from("bot_settings").select("value").eq("tenant_id", 0).eq("key", "bsc_last_block").maybeSingle();
   let fromBlock = Number(s?.value ?? 0);
   if (!fromBlock || fromBlock > latest) fromBlock = latest - MAX_BLOCK_SPAN;
-  if (latest - fromBlock > MAX_BLOCK_SPAN) fromBlock = latest - MAX_BLOCK_SPAN;
+  fromBlock = Math.max(0, fromBlock);
+  const toBlock = Math.min(latest, fromBlock + MAX_BLOCK_SPAN);
 
   const logs = await rpc("eth_getLogs", [{
     address: USDT_CONTRACT,
     topics: [TRANSFER_TOPIC, null, pad32(wallet)],
     fromBlock: "0x" + fromBlock.toString(16),
-    toBlock: "0x" + latest.toString(16),
+    toBlock: "0x" + toBlock.toString(16),
   }]);
 
   let paid = 0;
+  let failed = false;
+  const used = new Set<number>();
   for (const log of logs ?? []) {
     const amount = logAmount(log.data);
-    const match = waiting.find((p: any) => Math.abs(Number(p.amount) - amount) < 1e-9);
+    const match = waiting.find((p: any) => !used.has(p.id) && Math.abs(Number(p.amount) - amount) < 1e-9);
     if (!match) continue;
-    const { data: res } = await db.rpc("fulfill_crypto_payment", { p_id: match.id, p_tx: log.transactionHash });
-    if (!res || (res as any).err) continue;
+    const { error: queueError } = await db.from("bot_payment_transfers").upsert({ payment_id: match.id, tx_hash: log.transactionHash }, { onConflict: "payment_id", ignoreDuplicates: true });
+    if (queueError) { failed = true; continue; }
+    const { data: res, error } = await db.rpc("fulfill_crypto_payment", { p_id: match.id, p_tx: log.transactionHash });
+    if (error || !res || (res.err && !String(res.err).startsWith("already "))) { failed = true; continue; }
+    if (res.err) continue;
+    used.add(match.id);
     paid++;
-    await notifyPaid(notifyToken, Number(match.tg_id), res, "bep20");
-    if ((res as any).kind === "sub") await creditAffiliateCrypto(notifyToken, match.id, Number(match.account_id));
+    await notifyPaid(notifyToken, Number(match.tg_id), res, "bep20", match.id);
+    await db.from("bot_payment_transfers").update({ done: true }).eq("payment_id", match.id);
   }
 
-  await db.from("bot_settings").upsert({ tenant_id: 0, key: "bsc_last_block", value: String(latest) });
+  if (!failed) {
+    const { error } = await db.from("bot_settings").upsert({ tenant_id: 0, key: "bsc_last_block", value: String(toBlock) });
+    if (error) throw error;
+  }
   return { scanned: (logs ?? []).length + t.scanned, paid: paid + t.paid };
 }
 

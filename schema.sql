@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS public.crypto_payments (
   created_at timestamptz NOT NULL DEFAULT now(),
   paid_at timestamptz
 );
+GRANT ALL ON public.crypto_payments TO service_role;
 ALTER TABLE public.crypto_payments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.crypto_payments ADD COLUMN IF NOT EXISTS network text NOT NULL DEFAULT 'bep20';
 
@@ -105,7 +106,7 @@ CREATE OR REPLACE FUNCTION public.fulfill_crypto_payment(p_id integer, p_tx text
  SET search_path TO 'public'
 AS $function$
 DECLARE
-  p record; cu record; t record; price double precision; days integer;
+  p record; cu record; t record; price double precision; days integer; result jsonb;
 BEGIN
   SELECT * INTO p FROM crypto_payments WHERE id = p_id FOR UPDATE;
   IF NOT FOUND THEN RETURN jsonb_build_object('err', 'not found'); END IF;
@@ -125,11 +126,15 @@ BEGIN
       status = 'active', reminded = 0, owner_tg_id = EXCLUDED.owner_tg_id
     RETURNING * INTO t;
     INSERT INTO tenant_bot_payments (tenant_id, amount, days, note) VALUES (t.id, p.amount, days, 'crypto-' || COALESCE(p.network, 'bep20'));
-    RETURN jsonb_build_object('ok', true, 'kind', 'sub', 'amount', p.amount, 'expires_at', t.expires_at, 'balance', COALESCE(cu.balance, 0));
+    result := jsonb_build_object('ok', true, 'kind', 'sub', 'amount', p.amount, 'expires_at', t.expires_at, 'balance', COALESCE(cu.balance, 0), 'affiliate', award_subscription_affiliate(p.account_id, 'crypto:' || p.id));
+    INSERT INTO bot_operations VALUES (0,'crypto:' || p.id,'payment',result,now()) ON CONFLICT DO NOTHING;
+    RETURN result;
   END IF;
 
   UPDATE bot_accounts SET balance = balance + p.amount WHERE id = p.account_id RETURNING * INTO cu;
-  RETURN jsonb_build_object('ok', true, 'kind', 'topup', 'amount', p.amount, 'balance', cu.balance);
+  result := jsonb_build_object('ok', true, 'kind', 'topup', 'amount', p.amount, 'balance', cu.balance);
+  INSERT INTO bot_operations VALUES (0,'crypto:' || p.id,'payment',result,now()) ON CONFLICT DO NOTHING;
+  RETURN result;
 END;
 $function$;
 
@@ -165,6 +170,7 @@ ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS referred_by integer;
 ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS aff_amount double precision;
 CREATE INDEX IF NOT EXISTS bot_accounts_referred_by_idx ON bot_accounts (referred_by);
 CREATE TABLE IF NOT EXISTS affiliate_earnings (id serial PRIMARY KEY, referrer_id integer NOT NULL, buyer_id integer NOT NULL, amount double precision NOT NULL, source text NOT NULL UNIQUE, created_at timestamptz NOT NULL DEFAULT now());
+GRANT ALL ON affiliate_earnings TO service_role;
 ALTER TABLE affiliate_earnings ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS affiliate_earnings_referrer_idx ON affiliate_earnings (referrer_id);
 CREATE OR REPLACE FUNCTION public.credit_affiliate(p_buyer integer, p_amount double precision, p_source text)
@@ -192,4 +198,164 @@ NOTIFY pgrst, 'reload schema';
 -- Random unique affiliate codes. Idempotent.
 ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS ref_code text;
 CREATE UNIQUE INDEX IF NOT EXISTS bot_accounts_ref_code_idx ON bot_accounts (ref_code);
+NOTIFY pgrst, 'reload schema';
+
+-- Reliability objects are private to the running bot. Reapplied by VPS updater.
+CREATE TABLE IF NOT EXISTS public.bot_operations (
+  tenant_id integer NOT NULL, request_id text NOT NULL, kind text NOT NULL,
+  response jsonb NOT NULL, created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, request_id, kind)
+);
+GRANT ALL ON public.bot_operations TO service_role;
+ALTER TABLE public.bot_operations ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS public.bot_outbox (
+  id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, tenant_id integer NOT NULL,
+  chat_id bigint NOT NULL, html text NOT NULL, extra jsonb NOT NULL DEFAULT '{}'::jsonb,
+  source text UNIQUE, status text NOT NULL DEFAULT 'pending', attempts integer NOT NULL DEFAULT 0,
+  created_at timestamptz NOT NULL DEFAULT now(), sent_at timestamptz
+);
+GRANT ALL ON public.bot_outbox TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE public.bot_outbox_id_seq TO service_role;
+ALTER TABLE public.bot_outbox ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS bot_outbox_pending_idx ON public.bot_outbox(id) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS public.bot_update_queue (
+  tenant_id integer NOT NULL, update_id bigint NOT NULL, payload jsonb NOT NULL,
+  status text NOT NULL DEFAULT 'pending', lease_until timestamptz,
+  attempts integer NOT NULL DEFAULT 0, created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (tenant_id, update_id)
+);
+GRANT ALL ON public.bot_update_queue TO service_role;
+ALTER TABLE public.bot_update_queue ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS bot_update_queue_pending_idx ON public.bot_update_queue(created_at) WHERE status <> 'done';
+
+-- Never guess the owner of an already ambiguous invoice; retain it for review.
+WITH duplicates AS (
+ SELECT network, amount FROM public.crypto_payments WHERE status = 'pending'
+ GROUP BY network, amount HAVING count(*) > 1
+)
+UPDATE public.crypto_payments p SET status = 'review_amount_conflict'
+FROM duplicates d WHERE p.status = 'pending' AND p.network = d.network AND p.amount = d.amount;
+CREATE UNIQUE INDEX IF NOT EXISTS crypto_payments_pending_amount_idx
+ ON public.crypto_payments(network, amount) WHERE status = 'pending';
+
+CREATE OR REPLACE FUNCTION public.award_subscription_affiliate(p_account integer, p_source text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE enabled text; amount double precision; result jsonb;
+BEGIN
+ SELECT value INTO enabled FROM bot_settings WHERE tenant_id = 0 AND key = 'aff_enabled';
+ IF enabled = '0' THEN RETURN jsonb_build_object('err', 'disabled'); END IF;
+ SELECT value::double precision INTO amount FROM bot_settings WHERE tenant_id = 0 AND key = 'aff_amount';
+ result := credit_affiliate(p_account, COALESCE(amount, 5), p_source);
+ RETURN result;
+END; $$;
+
+CREATE OR REPLACE FUNCTION public.adjust_bot_balance(p_tenant integer, p_account integer, p_delta double precision, p_request text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE result jsonb; account record;
+BEGIN
+ IF p_delta = 0 OR p_delta::text IN ('NaN','Infinity','-Infinity') THEN RAISE EXCEPTION 'Invalid amount'; END IF;
+ PERFORM pg_advisory_xact_lock(hashtextextended(p_tenant || ':' || p_request || ':balance', 0));
+ SELECT response INTO result FROM bot_operations WHERE tenant_id=p_tenant AND request_id=p_request AND kind='balance';
+ IF FOUND THEN RETURN result; END IF;
+ UPDATE bot_accounts SET balance=balance+p_delta WHERE id=p_account AND tenant_id=p_tenant RETURNING balance,tg_id,username INTO account;
+ IF NOT FOUND THEN RAISE EXCEPTION 'Account not found'; END IF;
+ result := to_jsonb(account);
+ INSERT INTO bot_operations VALUES (p_tenant,p_request,'balance',result,now());
+ RETURN result;
+END; $$;
+
+CREATE OR REPLACE FUNCTION public.buy_keys_once(p_tenant integer, p_account integer, p_product integer, p_qty integer, p_request text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE result jsonb;
+BEGIN
+ PERFORM pg_advisory_xact_lock(hashtextextended(p_tenant || ':' || p_request || ':keys', 0));
+ SELECT response INTO result FROM bot_operations WHERE tenant_id=p_tenant AND request_id=p_request AND kind='keys';
+ IF FOUND THEN RETURN result; END IF;
+ result := buy_keys(p_tenant,p_account,p_product,p_qty);
+ INSERT INTO bot_operations VALUES (p_tenant,p_request,'keys',result,now());
+ RETURN result;
+END; $$;
+
+CREATE OR REPLACE FUNCTION public.buy_subscription_once(p_account integer, p_tg bigint, p_price double precision, p_days integer, p_request text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE result jsonb;
+BEGIN
+ PERFORM pg_advisory_xact_lock(hashtextextended('0:' || p_request || ':subscription', 0));
+ SELECT response INTO result FROM bot_operations WHERE tenant_id=0 AND request_id=p_request AND kind='subscription';
+ IF FOUND THEN RETURN result; END IF;
+ result := buy_subscription(p_account,p_tg,p_price,p_days);
+ IF result->>'ok' = 'true' THEN result := result || jsonb_build_object('affiliate', award_subscription_affiliate(p_account,'wallet:' || p_request)); END IF;
+ INSERT INTO bot_operations VALUES (0,p_request,'subscription',result,now());
+ RETURN result;
+END; $$;
+
+CREATE OR REPLACE FUNCTION public.add_bot_keys(p_tenant integer, p_product integer, p_keys text[], p_request text)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE result jsonb;
+BEGIN
+ PERFORM pg_advisory_xact_lock(hashtextextended(p_tenant || ':' || p_request || ':inventory', 0));
+ SELECT response INTO result FROM bot_operations WHERE tenant_id=p_tenant AND request_id=p_request AND kind='inventory';
+ IF FOUND THEN RETURN result; END IF;
+ IF NOT EXISTS(SELECT 1 FROM products WHERE id=p_product AND tenant_id=p_tenant) THEN RAISE EXCEPTION 'Product not found'; END IF;
+ IF COALESCE(cardinality(p_keys),0)=0 THEN RAISE EXCEPTION 'No keys'; END IF;
+ INSERT INTO product_keys(product_id,key) SELECT p_product,unnest(p_keys);
+ result := jsonb_build_object('count',cardinality(p_keys));
+ INSERT INTO bot_operations VALUES (p_tenant,p_request,'inventory',result,now());
+ RETURN result;
+END; $$;
+
+CREATE OR REPLACE FUNCTION public.claim_bot_updates()
+RETURNS SETOF public.bot_update_queue LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+ RETURN QUERY WITH candidates AS (
+ SELECT q.tenant_id,q.update_id FROM bot_update_queue q
+ WHERE q.status='pending' AND (q.lease_until IS NULL OR q.lease_until < now())
+ AND NOT EXISTS (SELECT 1 FROM bot_update_queue earlier WHERE earlier.tenant_id=q.tenant_id
+   AND earlier.status='pending' AND earlier.update_id < q.update_id)
+ ORDER BY q.created_at LIMIT 20 FOR UPDATE SKIP LOCKED
+ ) UPDATE bot_update_queue q SET lease_until=now()+interval '5 minutes',attempts=q.attempts+1
+ FROM candidates c WHERE q.tenant_id=c.tenant_id AND q.update_id=c.update_id RETURNING q.*;
+END; $$;
+
+REVOKE EXECUTE ON FUNCTION public.fulfill_crypto_payment(integer,text) FROM PUBLIC,anon,authenticated;
+REVOKE EXECUTE ON FUNCTION public.award_subscription_affiliate(integer,text) FROM PUBLIC,anon,authenticated;
+REVOKE EXECUTE ON FUNCTION public.adjust_bot_balance(integer,integer,double precision,text) FROM PUBLIC,anon,authenticated;
+REVOKE EXECUTE ON FUNCTION public.buy_keys_once(integer,integer,integer,integer,text) FROM PUBLIC,anon,authenticated;
+REVOKE EXECUTE ON FUNCTION public.buy_subscription_once(integer,bigint,double precision,integer,text) FROM PUBLIC,anon,authenticated;
+REVOKE EXECUTE ON FUNCTION public.add_bot_keys(integer,integer,text[],text) FROM PUBLIC,anon,authenticated;
+REVOKE EXECUTE ON FUNCTION public.claim_bot_updates() FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.fulfill_crypto_payment(integer,text), public.award_subscription_affiliate(integer,text),
+ public.adjust_bot_balance(integer,integer,double precision,text), public.buy_keys_once(integer,integer,integer,integer,text),
+ public.buy_subscription_once(integer,bigint,double precision,integer,text), public.add_bot_keys(integer,integer,text[],text),
+ public.claim_bot_updates() TO service_role;
+NOTIFY pgrst, 'reload schema';
+
+CREATE TABLE IF NOT EXISTS public.bot_payment_transfers (
+ payment_id integer PRIMARY KEY REFERENCES public.crypto_payments(id), tx_hash text NOT NULL UNIQUE,
+ done boolean NOT NULL DEFAULT false, created_at timestamptz NOT NULL DEFAULT now()
+);
+GRANT ALL ON public.bot_payment_transfers TO service_role;
+ALTER TABLE public.bot_payment_transfers ENABLE ROW LEVEL SECURITY;
+CREATE OR REPLACE FUNCTION public.payment_delivery_result(p_id integer)
+RETURNS jsonb LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
+ SELECT response FROM bot_operations WHERE tenant_id=0 AND request_id='crypto:' || p_id AND kind='payment';
+$$;
+REVOKE EXECUTE ON FUNCTION public.payment_delivery_result(integer) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.payment_delivery_result(integer) TO service_role;
+NOTIFY pgrst, 'reload schema';
+
+ALTER TABLE public.bot_outbox ADD COLUMN IF NOT EXISTS lease_until timestamptz;
+CREATE OR REPLACE FUNCTION public.claim_bot_delivery(p_id bigint)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE result bot_outbox;
+BEGIN
+ UPDATE bot_outbox SET lease_until=now()+interval '2 minutes',attempts=attempts+1
+ WHERE id=p_id AND status='pending' AND (lease_until IS NULL OR lease_until < now()) RETURNING * INTO result;
+ IF NOT FOUND THEN RETURN NULL; END IF;
+ RETURN to_jsonb(result);
+END; $$;
+REVOKE EXECUTE ON FUNCTION public.claim_bot_delivery(bigint) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.claim_bot_delivery(bigint) TO service_role;
 NOTIFY pgrst, 'reload schema';

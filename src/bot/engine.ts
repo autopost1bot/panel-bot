@@ -5,6 +5,7 @@
 // buy_subscription).
 
 import { getDb, hashPassword } from "./db";
+import { affiliateNotice, deliver } from "./reliability";
 import {
   btn, entitiesToHtml, escapeHtml, fmtDate, kb, money, plainLabel,
   editHtml, sendHtml, tgCall, urlBtn, webhookSecret, type TgEntity,
@@ -77,6 +78,7 @@ export type BotInfo = {
   ownerTgId: number;      // tenant owner (0 for main)
   isMain: boolean;
   adminTgIds: number[];   // main bot admins
+  durable?: boolean;
 };
 
 type Ctx = {
@@ -91,6 +93,7 @@ type Ctx = {
   emojiOwn: EmojiTheme;
   emojiDefaults: EmojiTheme;
   hide: boolean;                 // customer view: show "$" instead of prices
+  requestId: string;
   prices: Map<number, number>;   // customer view: account-specific prices
 };
 
@@ -161,6 +164,8 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
     getSetting(bot, "premium_emoji"),
     bot.isMain ? Promise.resolve(null) : getSetting({ ...bot, tenantId: 0 }, "premium_emoji"),
   ]);
+  if ((tRes as any).error) throw (tRes as any).error;
+  if (sRes.error) throw sRes.error;
   if (!bot.isMain) {
     const t = tRes.data;
     if (!t || t.status === "disabled") return;
@@ -184,14 +189,15 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   const save = async () => {
     const next = JSON.stringify(session);
     if (srow && next === savedState) return; // unchanged — skip the DB write
+    const { error } = await db.from("bot_sessions").upsert({ tenant_id: bot.tenantId, tg_id: tgId, state: session as any, updated_at: new Date().toISOString() });
+    if (error) throw error;
     savedState = next;
-    await db.from("bot_sessions").upsert({ tenant_id: bot.tenantId, tg_id: tgId, state: session as any, updated_at: new Date().toISOString() });
   };
 
   const isBoss = bot.isMain ? bot.adminTgIds.includes(tgId) : tgId === bot.ownerTgId;
   const emojiOwn = parseEmojiTheme(emojiRaw);
   const emojiDefaults = parseEmojiTheme(defaultEmojiRaw);
-  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", tgUsername: String(from.username ?? ""), session, isBoss, emoji: resolveEmojiTheme(emojiOwn, emojiDefaults), emojiOwn, emojiDefaults, hide: false, prices: new Map() };
+  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", tgUsername: String(from.username ?? ""), session, isBoss, requestId: String(update.update_id ?? cq?.id ?? msg?.message_id ?? crypto.randomUUID()), emoji: resolveEmojiTheme(emojiOwn, emojiDefaults), emojiOwn, emojiDefaults, hide: false, prices: new Map() };
   (ctx as any).__msgId = msg?.message_id ?? null;
   // Customers see prices hidden (only "$") when the shop owner enabled it,
   // and their own account-specific prices when set.
@@ -210,6 +216,7 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   // Button taps edit the tapped message in place (no new message per step);
   // later replies in the same update (e.g. long lists) still send fresh ones.
   const cqMsgId: number | null = cq?.message?.message_id ?? null;
+  (ctx as any).__receiptMessageId = cqMsgId;
   let navigated = false;
   const reply = async (html: string, extra: Record<string, unknown> = {}) => {
     html = themeHtml(html, ctx.emoji);
@@ -232,6 +239,7 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   } catch (err) {
     console.error("bot update failed", err);
     await reply("⚠️ Something went wrong. Please try again.").catch(() => {});
+    if (bot.durable) throw err;
   }
   await ackP;
 }
@@ -957,7 +965,9 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       const { data: p } = await db.from("products").select("id").eq("id", step.pid).eq("tenant_id", bot.tenantId).maybeSingle();
       if (!p) { ctx.session.step = null; return; }
       const keys = raw.split(/\r?\n/).map((k) => k.trim()).filter(Boolean);
-      await db.from("product_keys").insert(keys.map((k) => ({ product_id: step.pid, key: k })));
+      if (!keys.length) { await reply("❌ Send at least one key.", kb([btn("✖️ Cancel", `x:ak:${step.pid}`)])); return; }
+      const { error } = await db.rpc("add_bot_keys", { p_tenant: bot.tenantId, p_product: step.pid, p_keys: keys, p_request: ctx.requestId });
+      if (error) { if (bot.durable) throw error; await reply("❌ Keys were not saved. Please resend them.", kb([btn("✖️ Cancel", `x:ak:${step.pid}`)])); return; }
       ctx.session.step = null;
       await reply(`✅ Added ${keys.length} key(s).`, kb([btn("🔑 Add more", `a:k:${step.pid}`), btn("⬅️ Back", `a:p:${step.pid}`)]));
       return;
@@ -993,7 +1003,8 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (!uname || !Number.isFinite(a) || a === 0) { await reply("❌ Format: <code>USERNAME AMOUNT</code>", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: acc } = await db.from("bot_accounts").select("*").eq("tenant_id", bot.tenantId).eq("username", uname.toLowerCase()).maybeSingle();
       if (!acc) { await reply("❌ Unknown username.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
-      const { data: c } = await db.from("bot_accounts").update({ balance: Number(acc.balance) + a }).eq("id", acc.id).select("balance, tg_id").single();
+      const { data: c, error: balanceError } = await db.rpc("adjust_bot_balance", { p_tenant: bot.tenantId, p_account: acc.id, p_delta: a, p_request: ctx.requestId });
+      if (balanceError && bot.durable) throw balanceError;
       ctx.session.step = null;
       if (!c) { await reply("❌ Update failed.", kb([btn("⬅️ Menu", "a:home")])); return; }
       if (c.tg_id) await sendHtml(bot.token, Number(c.tg_id), `💰 Your balance was ${a > 0 ? "credited" : "debited"} <b>${money(Math.abs(a))}</b>. New balance: <b>${money(c.balance)}</b>`).catch(() => {});
@@ -1021,7 +1032,8 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       const amount = step.s === "topup" ? num : -num;
       const { data: acc } = await db.from("bot_accounts").select("*").eq("id", step.cid).eq("tenant_id", bot.tenantId).maybeSingle();
       if (!acc) { ctx.session.step = null; await reply("❌ Account not found.", kb([btn("⬅️ Menu", "a:home")])); return; }
-      const { data: c } = await db.from("bot_accounts").update({ balance: Number(acc.balance) + amount }).eq("id", acc.id).select("balance, tg_id, username").single();
+      const { data: c, error: balanceError } = await db.rpc("adjust_bot_balance", { p_tenant: bot.tenantId, p_account: acc.id, p_delta: amount, p_request: ctx.requestId });
+      if (balanceError && bot.durable) throw balanceError;
       ctx.session.step = null;
       if (!c) { await reply("❌ Update failed.", kb([btn("⬅️ Menu", "a:home")])); return; }
       if (c.tg_id) await sendHtml(bot.token, Number(c.tg_id), `💰 Your balance was ${amount > 0 ? "credited" : "debited"} <b>${money(Math.abs(amount))}</b>. New balance: <b>${money(c.balance)}</b>`).catch(() => {});
@@ -1370,15 +1382,8 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     await reply("🗑 All products and categories deleted. The shop is empty now.", kb([btn("➕ Add product", "a:add")], [btn("⬅️ Go back", "a:home")]));
     return;
   }
-  if (data === "a:accs" && own) return manageList(ctx, reply);
-  if (data === "a:cpu" && own) {
-    const { data: cs } = await db.from("bot_accounts").select("id,username,tg_name").eq("tenant_id", bot.tenantId).order("username").limit(60);
-    if (!cs?.length) { await reply("👥 No accounts yet. Add one first with 👤 Add account.", kb([btn("⬅️ Go back", "a:home")])); return; }
-    const rows: any[][] = [];
-    for (let i = 0; i < cs.length; i += 2) rows.push(cs.slice(i, i + 2).map((c: any) => btn(plainLabel(c.username), `a:cp:${c.id}`)));
-    await reply("💲 <b>Custom prices</b>\nChoose an account to set special prices:", { ...kb(...rows, [btn("⬅️ Go back", "a:home")]), noButtonColors: true });
-    return;
-  }
+  if ((m = data.match(/^a:accs(?::(\d+))?$/)) && own) return manageList(ctx, reply, Number(m[1] ?? 0));
+  if ((m = data.match(/^a:cpu(?::(\d+))?$/)) && own) return manageList(ctx, reply, Number(m[1] ?? 0), true);
   if ((m = data.match(/^a:users:(\d+)$/)) && own) return usersPage(ctx, reply, Number(m[1]));
   if ((m = data.match(/^a:purch(?::(\d+))?$/)) && own) {
     return historyPage(ctx, reply, Number(m[1] ?? 0), "a:purch");
@@ -1512,20 +1517,20 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
       kb([btn("⬅️ Back", `a:tb:${tid}`)]));
     return;
   }
-  if ((m = data.match(/^a:vk:(\d+)$/)) && own) {
+  if ((m = data.match(/^a:vk:(\d+)(?::(\d+))?$/)) && own) {
     const pid = Number(m[1]);
     const p = await getProduct(db, bot.tenantId, pid);
     if (!p) return;
-    const lines = await keysReport(db, bot.tenantId, p);
-    await replyLines(reply, lines, kb([btn("⬅️ Go back", `a:p:${pid}`)]));
+    const report = await keysReport(db, bot.tenantId, p, Number(m[2] ?? 0));
+    await replyLines(reply, report.lines, keyPageButtons(report, `a:vk:${pid}`, `a:p:${pid}`));
     return;
   }
-  if ((m = data.match(/^a:tbk:(\d+):(\d+)$/)) && own && bot.isMain) {
+  if ((m = data.match(/^a:tbk:(\d+):(\d+)(?::(\d+))?$/)) && own && bot.isMain) {
     const tid = Number(m[1]), pid = Number(m[2]);
     const p = await getProduct(db, tid, pid);
     if (!p) return;
-    const lines = await keysReport(db, tid, p);
-    await replyLines(reply, lines, kb([btn("⬅️ Back", `a:tb:${tid}`)]));
+    const report = await keysReport(db, tid, p, Number(m[3] ?? 0));
+    await replyLines(reply, report.lines, keyPageButtons(report, `a:tbk:${tid}:${pid}`, `a:tb:${tid}`));
     return;
   }
 
@@ -1596,29 +1601,39 @@ async function variantPrompt(ctx: Ctx, reply: (h: string, e?: any) => any, pid: 
   return ask(ctx, reply, { s: "add_vars", pid }, "⏱ Enter the duration (e.g. 1 Day, 7 Days):");
 }
 
-async function keysReport(db: any, tid: number, p: any): Promise<string[]> {
-  const pid = Number(p.id);
-  const vars = Number(p.nvars) ? await variantsOf(db, tid, pid) : [p];
-  const lines = [`🔑 <b>Keys — ${p.name}</b>`];
-  for (const v of vars) {
-    const { data: ks } = await db.from("product_keys").select("key, sold").eq("product_id", Number(v.id)).order("id").limit(200);
-    const soldKeys = (ks ?? []).filter((k: any) => k.sold).map((k: any) => k.key);
-    const buyers = new Map<string, { user: string; date: string; price: string }>();
-    if (soldKeys.length) {
-      const { data: os } = await db.from("shop_orders").select("key, account_id, created_at, price").eq("tenant_id", tid).eq("product_id", Number(v.id)).in("key", soldKeys).limit(200);
-      const accIds = [...new Set((os ?? []).map((o: any) => Number(o.account_id)))];
-      const { data: accs } = accIds.length ? await db.from("bot_accounts").select("id, username").in("id", accIds) : { data: [] };
-      const names = new Map((accs ?? []).map((a: any) => [Number(a.id), a.username as string]));
-      for (const o of os ?? []) if (o.key) buyers.set(o.key, { user: names.get(Number(o.account_id)) ?? `#${o.account_id}`, date: fmtDate(o.created_at), price: money(o.price ?? v.price) });
+function keyPageButtons(report: { page: number; pages: number }, prefix: string, back: string) {
+  const nav = [];
+  if (report.page > 0) nav.push(btn("⬅️ Previous", `${prefix}:${report.page - 1}`));
+  if (report.page + 1 < report.pages) nav.push(btn("Next ➡️", `${prefix}:${report.page + 1}`));
+  return kb(...(nav.length ? [nav] : []), [btn("⬅️ Go back", back)]);
+}
+async function keysReport(db: any, tid: number, p: any, requested = 0) {
+  const vars = Number(p.nvars) ? await variantsOf(db, tid, Number(p.id)) : [p];
+  const ids = vars.map((v: any) => Number(v.id));
+  const query = () => db.from("product_keys").select("id,product_id,key,sold", { count: "exact" }).in("product_id", ids);
+  const counted = await query().limit(0);
+  if (counted.error) throw counted.error;
+  const pages = Math.max(1, Math.ceil((counted.count ?? 0) / 10));
+  const page = Math.min(Math.max(0, requested), pages - 1);
+  const { data: ks, error } = await query().order("id").range(page * 10, page * 10 + 9);
+  if (error) throw error;
+  const lines = [`🔑 <b>Keys — ${p.name}</b> · Page ${page + 1}/${pages}`, `${counted.count ?? 0} keys total`];
+  for (const k of ks ?? []) {
+    const v = vars.find((v: any) => Number(v.id) === Number(k.product_id)) ?? p;
+    let detail = "";
+    if (k.sold) {
+      const order = await db.from("shop_orders").select("account_id,created_at,price").eq("tenant_id", tid).eq("product_id", k.product_id).eq("key", k.key).order("id", { ascending: false }).limit(1).maybeSingle();
+      if (order.error) throw order.error;
+      if (order.data) {
+        const account = await db.from("bot_accounts").select("username").eq("tenant_id", tid).eq("id", order.data.account_id).maybeSingle();
+        if (account.error) throw account.error;
+        detail = ` — 💵 ${money(order.data.price)} · 👤 ${escapeHtml(account.data?.username ?? "Unavailable")} · 📅 ${fmtDate(order.data.created_at)}`;
+      }
     }
-    lines.push("", `⏱ <b>${v.id === p.id ? "Keys" : v.name}</b> (${(ks ?? []).filter((k: any) => !k.sold).length} unsold / ${(ks ?? []).length})`);
-    if (!ks?.length) lines.push("No keys.");
-    for (const k of ks ?? []) {
-      const b = buyers.get(k.key);
-      lines.push(k.sold ? `✅ sold <code>${escapeHtml(k.key)}</code>` + (b ? ` — 💵 ${b.price} · 👤 ${escapeHtml(b.user)} · 📅 ${b.date}` : "") : `🟢 <code>${escapeHtml(k.key)}</code>`);
-    }
+    lines.push(`⏱ ${escapeHtml(plainLabel(v.name))} · ${k.sold ? "✅ sold" : "🟢"} <code>${escapeHtml(k.key)}</code>${detail}`);
   }
-  return lines;
+  if (!ks?.length) lines.push("No keys.");
+  return { lines, page, pages };
 }
 
 async function adminProduct(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number) {
@@ -1762,14 +1777,22 @@ async function balPicker(ctx: Ctx, reply: (h: string, e?: any) => any, page: num
     { ...kb(...rows, ...(nav.length ? [nav] : []), back), noButtonColors: true });
 }
 
-async function manageList(ctx: Ctx, reply: (h: string, e?: any) => any) {
+async function manageList(ctx: Ctx, reply: (h: string, e?: any) => any, requested = 0, custom = false) {
   const db = await getDb();
-  const { data: cs } = await db.from("bot_accounts").select("*").eq("tenant_id", ctx.bot.tenantId).order("balance", { ascending: false }).limit(40);
+  const prefix = custom ? "a:cpu" : "a:accs";
+  const query = () => db.from("bot_accounts").select("id,username,balance", { count: "exact" }).eq("tenant_id", ctx.bot.tenantId);
+  const counted = await query().limit(0);
+  if (counted.error) throw counted.error;
+  const pages = Math.max(1, Math.ceil((counted.count ?? 0) / 10));
+  const page = Math.min(Math.max(0, requested), pages - 1);
+  const { data: cs, error } = await query().order("balance", { ascending: false }).order("id").range(page * 10, page * 10 + 9);
+  if (error) throw error;
   if (!cs?.length) { await reply("👥 No accounts yet.", kb(...(ctx.bot.isMain ? [] : [[btn("👤 Add account", "a:acc")]]), [btn("⬅️ Back", "a:home")])); return; }
-  const rows: any[][] = [];
-  for (let i = 0; i < cs.length; i += 2)
-    rows.push(cs.slice(i, i + 2).map((c: any) => btn(`${plainLabel(c.username)} (${money(c.balance)})`, `a:m:${c.id}`)));
-  await reply("👤 <b>Choose account to manage:</b>", kb(...(ctx.bot.isMain ? [] : [[btn("➕ Add account", "a:acc")]]), ...rows, [btn("⬅️ Go back", "a:manage")]));
+  const rows: any[][] = cs.map((c: any) => [btn(custom ? plainLabel(c.username) : `${plainLabel(c.username)} (${money(c.balance)})`, custom ? `a:cp:${c.id}` : `a:m:${c.id}`)]);
+  const nav = [];
+  if (page > 0) nav.push(btn("⬅️ Previous", `${prefix}:${page - 1}`));
+  if (page + 1 < pages) nav.push(btn("Next ➡️", `${prefix}:${page + 1}`));
+  await reply(`${custom ? "💲 <b>Custom prices</b>\nChoose an account to set special prices:" : "👤 <b>Choose account to manage:</b>"}\nPage ${page + 1}/${pages}`, { ...kb(...(ctx.bot.isMain || custom ? [] : [[btn("➕ Add account", "a:acc")]]), ...rows, ...(nav.length ? [nav] : []), [btn("⬅️ Go back", custom ? "a:home" : "a:manage")]), noButtonColors: true });
 }
 
 async function ownerShop(ctx: Ctx, reply: (h: string, e?: any) => any) {
@@ -1810,13 +1833,15 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
   // Go back returns to the bought product's duration list (its parent when a variant was bought).
   const { data: bought } = await db.from("products").select("parent_id").eq("id", pid).eq("tenant_id", ctx.bot.tenantId).maybeSingle();
   const backTo = bought?.parent_id ? `c:p:${bought.parent_id}` : `c:p:${pid}`;
-  const { data, error } = await db.rpc("buy_keys", { p_tenant: ctx.bot.tenantId, p_account: acc.id, p_product: pid, p_qty: qty });
+  const { data, error } = await db.rpc("buy_keys_once", { p_tenant: ctx.bot.tenantId, p_account: acc.id, p_product: pid, p_qty: qty, p_request: ctx.requestId });
   if (error) {
+    if (ctx.bot.durable && !/STOCK:/.test(error.message ?? "")) throw error;
     const stockMatch = /STOCK:(\d+)/.exec(error.message ?? "");
     const errTxt = stockMatch ? (Number(stockMatch[1]) ? `Only ${stockMatch[1]} in stock.` : "Out of stock.") : "Purchase failed. Please try again.";
     await reply("❌ " + errTxt, kb([btn("⬅️ Back", backTo)]));
     return;
   }
+  if (!data) throw new Error("Missing purchase response");
   const res = data as any;
   if (res?.err) { await reply("❌ " + res.err, kb([btn("⬅️ Back", backTo)])); return; }
   const header = `✅ <b>Purchase completed</b>\n` +
@@ -1845,7 +1870,7 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
   for (let index = 0; index < receipts.length; index++) {
     const message = receipts[index];
     if (message === undefined) continue;
-    await reply(message, index === receipts.length - 1 ? navigation : undefined);
+    await deliver(ctx.bot, ctx.chatId, themeHtml(message, ctx.emoji), themeExtra({ ...(index === receipts.length - 1 ? navigation : {}), ...(index === 0 && (ctx as any).__receiptMessageId ? { receiptMessageId: (ctx as any).__receiptMessageId } : {}) }, ctx.emoji), `receipt:${ctx.bot.tenantId}:${ctx.requestId}:${index}`);
   }
   const owner = ctx.bot.isMain ? ctx.bot.adminTgIds[0] : ctx.bot.ownerTgId;
   if (owner && owner !== ctx.tgId) await sendHtml(ctx.bot.token, owner, `🛒 New order: ${escapeHtml(res.label)} × ${qty} — ${money(res.total)} by ${escapeHtml(acc.username)}`).catch(() => {});
@@ -1916,8 +1941,8 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   }
   if (data === "tsub:pay") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
-    const { data: res, error } = await db.rpc("buy_subscription", { p_account: ctx.session.accountId, p_tg: ctx.tgId, p_price: price, p_days: days });
-    if (error || !res) { await reply("⚠️ Payment failed, nothing was charged. Please try again."); return; }
+    const { data: res, error } = await db.rpc("buy_subscription_once", { p_account: ctx.session.accountId, p_tg: ctx.tgId, p_price: price, p_days: days, p_request: ctx.requestId });
+    if (error || !res) { if (ctx.bot.durable) throw error ?? new Error("Missing subscription response"); await reply("⚠️ Could not confirm payment. Please try again."); return; }
     if ((res as any).err) {
       await reply(`❌ Not enough balance. You have <b>${money((res as any).balance)}</b>, need <b>${money(price)}</b>. Please top up first.`);
       return;
@@ -1930,7 +1955,7 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
       ctx.session.step = { s: "await_token" };
       await reply(tokenHelp());
     }
-    await creditAffiliate(ctx.bot, ctx.session.accountId, `sub:wallet:${t.id}:${Date.now()}`);
+    await affiliateNotice(ctx.bot, t.affiliate, `wallet:${ctx.requestId}`);
     for (const adminId of ctx.bot.adminTgIds) {
       await sendHtml(ctx.bot.token, adminId, `💰 Bot subscription: <b>${escapeHtml(ctx.session.username ?? String(ctx.session.accountId))}</b> paid ${money(price)} (tenant #${t.id}).`).catch(() => {});
     }

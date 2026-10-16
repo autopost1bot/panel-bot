@@ -165,10 +165,17 @@ const ordinaryExtra = (extra: Record<string, any>) => {
 export async function sendHtml(token: string, chatId: number, html: string, extra: Record<string, unknown> = {}) {
   try {
     return await tgCall(token, "sendMessage", { chat_id: chatId, text: html, parse_mode: "HTML", ...extra });
-  } catch {
+  } catch (error) {
+    const message = String((error as Error)?.message ?? error);
+    // Retry only rejected formatting; a timeout may already have delivered the message.
+    if (!/400:.*(entity|parse|emoji|BUTTON_STYLE|icon|style)/i.test(message)) {
+      console.error("Telegram delivery failed", chatId);
+      return null;
+    }
     try {
       return await tgCall(token, "sendMessage", { chat_id: chatId, text: stripTgEmoji(html), parse_mode: "HTML", ...ordinaryExtra(extra) });
     } catch {
+      console.error("Telegram fallback delivery failed", chatId);
       return null;
     }
   }
