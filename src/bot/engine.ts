@@ -892,7 +892,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     case "support": {
       if (!ctx.isBoss) return;
       const u = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
-      if (!/^[A-Za-z0-9_]{4,32}$/.test(u)) { await reply("❌ Send a valid Telegram username, e.g. @mysupport"); return; }
+      if (!/^[A-Za-z0-9_]{4,32}$/.test(u)) { await reply("❌ Send a valid Telegram username, e.g. @YOUR_TELEGRAM"); return; }
       await setSetting(bot, "support_username", u);
       ctx.session.step = null;
       await reply(`✅ Support username saved: @${escapeHtml(u)}\nThe 💬 Support button now opens this chat.`, kb([btn("⬅️ Go back", "a:sup")]));
@@ -1197,7 +1197,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     ));
     return;
   }
-  if (data === "a:sup:set" && own) return ask(ctx, reply, { s: "support" }, "💬 Send the Telegram username for support (e.g. @mysupport):");
+  if (data === "a:sup:set" && own) return ask(ctx, reply, { s: "support" }, "💬 Send the Telegram username for support (e.g. @YOUR_TELEGRAM):");
   if (data === "a:sup:del" && own) {
     await setSetting(bot, "support_username", "");
     await reply("🗑 Support button removed.", kb([btn("⬅️ Go back", "a:sup")]));
