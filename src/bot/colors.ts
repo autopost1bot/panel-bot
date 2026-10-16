@@ -2,7 +2,8 @@ export type ButtonColor = "default" | "primary" | "success" | "danger";
 export type ButtonColors = { inline: ButtonColor; keyboard: ButtonColor; items?: Record<string, ButtonColor> };
 // Stable action IDs keep preferences independent of translated/custom-emoji labels.
 export const COLOR_BUTTONS = [
-  { id: "buy", label: "Buy keys", aliases: ["View shop"], actions: ["c:shop"] },
+  { id: "buy", label: "Buy keys" },
+  { id: "view_shop", label: "View shop", actions: ["c:shop"] },
   { id: "account", label: "Account", actions: ["c:me"] },
   { id: "logout", label: "Log out" },
   { id: "manage", label: "Reseller", aliases: ["Admin Panel", "Manage"], actions: ["a:manage"] },
