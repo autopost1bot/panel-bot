@@ -25,7 +25,7 @@ export type Network = "bep20" | "trc20";
 export const NETWORK_LABEL: Record<Network, string> = { bep20: "BEP20", trc20: "TRC20" };
 export const NETWORK_CHAIN: Record<Network, string> = { bep20: "BNB Smart Chain / BEP20", trc20: "Tron / TRC20" };
 export const isTronAddress = (v: string) => /^T[1-9A-HJ-NP-Za-km-z]{33}$/.test(v);
-const PAYMENT_TTL_MS = 60 * 60 * 1000; // pending payments expire after 1 hour
+export const PAYMENT_TTL_MS = 20 * 60 * 1000; // pending payments expire after 20 minutes
 const MAX_BLOCK_SPAN = 5000;
 
 async function rpc(method: string, params: unknown[]): Promise<any> {
@@ -84,6 +84,17 @@ export async function createPayment(accountId: number, tgId: number, kind: "topu
     if (error && !String(error.code ?? "").startsWith("23")) break; // not a duplicate -> retrying won't help
   }
   return null;
+}
+
+/** The account's still-open invoice (pending, younger than the TTL), if any. */
+export async function openPayment(accountId: number): Promise<(CryptoPayment & { created_at: string }) | null> {
+  const db = await getDb();
+  const { data, error } = await db.from("crypto_payments").select("*").eq("account_id", accountId).eq("status", "pending");
+  if (error) throw error;
+  const now = Date.now();
+  const live = (data ?? []).filter((p: any) => now - new Date(p.created_at ?? now).getTime() < PAYMENT_TTL_MS);
+  live.sort((a: any, b: any) => b.id - a.id);
+  return (live[0] as any) ?? null;
 }
 
 export async function getWallet(network: Network = "bep20"): Promise<string | null> {
