@@ -13,7 +13,7 @@ import {
 
 import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, resolveEmojiTheme, themeExtra, themeHtml, titlePrefix, type EmojiTheme } from "./emoji";
 import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "./colors";
-import { availableNetworks, checkPayment, createPayment, getWallet, isTronAddress, NETWORK_CHAIN, NETWORK_LABEL, type CryptoPayment, type Network } from "./crypto";
+import { availableNetworks, checkPayment, createPayment, getWallet, openPayment, PAYMENT_TTL_MS, isTronAddress, NETWORK_CHAIN, NETWORK_LABEL, type CryptoPayment, type Network } from "./crypto";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
 const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Reseller", stock: "📦 Stock", stats: "📊 Statistics" };
@@ -1909,6 +1909,7 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   if (data === "tsub:no") { await reply("Cancelled."); return; }
   if (data === "tsub:crypto" || data === "tsub:crypto:bep20" || data === "tsub:crypto:trc20") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    if (await showOpenPayment(ctx, reply)) return;
     return startCryptoPayment(ctx, reply, "sub", price, data.endsWith("trc20") ? "trc20" : "bep20");
   }
   if (data === "tsub:cancel") { ctx.session.step = null; return showMyBot(ctx, reply); }
@@ -1964,25 +1965,44 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
 
 // ─── Crypto payments (BEP20 USDT, main bot only) ─────────────────────────────
 
+/** If the account already has an open invoice, show it again instead of
+ *  allowing a new one (anti-spam: one invoice per user for 20 minutes). */
+async function showOpenPayment(ctx: Ctx, reply: (h: string, e?: any) => any): Promise<boolean> {
+  if (!ctx.session.accountId) return false;
+  const p = await openPayment(ctx.session.accountId);
+  if (!p) return false;
+  const net = ((p as any).network ?? "bep20") as Network;
+  const wallet = await getWallet(net);
+  const left = Math.max(1, Math.ceil((new Date(p.created_at).getTime() + PAYMENT_TTL_MS - Date.now()) / 60000));
+  ctx.session.step = null;
+  await reply(`⏳ <b>You already have a pending payment.</b>\nPlease complete it first — a new order can be created after it is paid or expires in <b>${left} min</b>.\n\n` + paymentText(p, wallet ?? "—", net, left), kb(
+    [btn("✅ I've paid", `pay:check:${p.id}`)],
+    [btn("🏠 Menu", "c:home")],
+  ));
+  return true;
+}
+
 async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "topup" | "sub", baseAmount: number, net: Network = "bep20") {
+  if (await showOpenPayment(ctx, reply)) return;
   const wallet = await getWallet(net);
   if (!wallet) { await reply(`⚠️ USDT (${NETWORK_LABEL[net]}) payments are not available yet. Please ask the admin.`); return; }
   const p = await createPayment(ctx.session.accountId!, ctx.tgId, kind, baseAmount, net);
   if (!p) { await reply("⚠️ Could not create the payment. Please try again."); return; }
-  await reply(paymentText(p, wallet, net), kb(
+  await reply(paymentText(p, wallet, net, Math.round(PAYMENT_TTL_MS / 60000)), kb(
     [btn("✅ I've paid", `pay:check:${p.id}`)],
     [btn("❌ Cancel", `pay:cancel:${p.id}`)],
   ));
 }
 
-function paymentText(p: CryptoPayment, wallet: string, net: Network = "bep20"): string {
+function paymentText(p: CryptoPayment, wallet: string, net: Network = "bep20", minutesLeft?: number): string {
   const L = NETWORK_LABEL[net];
   return `💳 <b>Pay with USDT (${L})</b>\n\n` +
     `Send <b>exactly</b> this amount:\n<code>${p.amount.toFixed(2)}</code> USDT\n\n` +
     `To this address (${NETWORK_CHAIN[net]}):\n<code>${escapeHtml(wallet)}</code>\n\n` +
     `⚠️ Send only <b>USDT on ${L}</b> — any other network or token is lost forever.\n` +
     `The exact amount (with the cents) identifies your payment.\n\n` +
-    `✅ Your payment is verified automatically within a minute — no need to send any proof.`;
+    `✅ Your payment is verified automatically within a minute — no need to send any proof.` +
+    (minutesLeft ? `\n\n⏳ This order expires in <b>${minutesLeft} min</b>. You cannot create a new order until it is paid or expired.` : "");
 }
 
 async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
@@ -1990,6 +2010,7 @@ async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, dat
   let m: RegExpMatchArray | null;
   if (data === "pay:top") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    if (await showOpenPayment(ctx, reply)) return;
     const nets = await availableNetworks();
     if (!nets.length) { await reply("⚠️ Crypto payments are not available yet. Please ask the admin."); return; }
     if (nets.length === 1) return ask(ctx, reply, { s: "pay_amount", net: nets[0] }, `💳 How much do you want to add via USDT (${NETWORK_LABEL[nets[0]]})? Send the amount in $ (e.g. 50):`);
@@ -1998,14 +2019,16 @@ async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, dat
   }
   if ((m = data.match(/^pay:top:(bep20|trc20)$/))) {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    if (await showOpenPayment(ctx, reply)) return;
     const net = m[1] as Network;
     if (!(await getWallet(net))) { await reply("⚠️ This network is not available yet. Please ask the admin."); return; }
     return ask(ctx, reply, { s: "pay_amount", net }, `💳 How much do you want to add via USDT (${NETWORK_LABEL[net]})? Send the amount in $ (e.g. 50):`);
   }
   if ((m = data.match(/^pay:cancel:(\d+)$/))) {
-    await db.from("crypto_payments").update({ status: "cancelled" })
-      .eq("id", Number(m[1])).eq("account_id", ctx.session.accountId ?? -1).eq("status", "pending");
-    await reply("❌ Payment cancelled.");
+    // Anti-spam: the invoice stays open until paid or expired (20 min), so
+    // cancelling cannot be used to create order after order.
+    ctx.session.step = null;
+    await reply("ℹ️ This order stays open for 20 minutes. If you send the exact amount it is still credited; otherwise it expires automatically and you can create a new one.", kb([btn("🏠 Menu", "c:home")]));
     return;
   }
   if ((m = data.match(/^pay:check:(\d+)$/))) {
