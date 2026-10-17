@@ -1674,22 +1674,38 @@ async function keysReport(db: any, tid: number, p: any, requested = 0) {
   const page = Math.min(Math.max(0, requested), pages - 1);
   const { data: ks, error } = await query().order("id").range(page * 10, page * 10 + 9);
   if (error) throw error;
-  const lines = [`🔑 <b>Keys — ${p.name}</b> · Page ${page + 1}/${pages}`, `${counted.count ?? 0} keys total`];
-  for (const k of ks ?? []) {
-    const v = vars.find((v: any) => Number(v.id) === Number(k.product_id)) ?? p;
-    let detail = "";
-    if (k.sold) {
-      const order = await db.from("shop_orders").select("account_id,created_at,price").eq("tenant_id", tid).eq("product_id", k.product_id).eq("key", k.key).order("id", { ascending: false }).limit(1).maybeSingle();
-      if (order.error) throw order.error;
-      if (order.data) {
-        const account = await db.from("bot_accounts").select("username").eq("tenant_id", tid).eq("id", order.data.account_id).maybeSingle();
-        if (account.error) throw account.error;
-        detail = ` — 💵 ${money(order.data.price)} · 👤 ${escapeHtml(account.data?.username ?? "Unavailable")} · 📅 ${fmtDate(order.data.created_at)}`;
+  const parent = p.parent_id ? await getProduct(db, tid, Number(p.parent_id)) : null;
+  const lines = [
+    `🔑 <b>Key inventory</b>`,
+    `<b>${escapeHtml(plainLabel(parent?.name ?? p.name))}</b>${parent ? ` · ${escapeHtml(plainLabel(p.name))}` : ""}`,
+    `${counted.count ?? 0} keys total · Page ${page + 1} of ${pages}`,
+  ];
+  for (const v of vars) {
+    const variantKeys = (ks ?? []).filter((k: any) => Number(k.product_id) === Number(v.id));
+    if (!variantKeys.length) continue;
+    if (Number(p.nvars)) lines.push(`\n⏱ <b>${escapeHtml(plainLabel(v.name))}</b>`);
+    const available = variantKeys.filter((k: any) => !k.sold);
+    const sold = variantKeys.filter((k: any) => k.sold);
+    if (available.length) {
+      lines.push(`\n🟢 <b>Available</b> · ${available.length} on this page`);
+      for (const k of available) lines.push(`<code>${escapeHtml(k.key)}</code>`);
+    }
+    if (sold.length) {
+      lines.push(`\n✅ <b>Sold</b> · ${sold.length} on this page`);
+      for (const k of sold) {
+        const order = await db.from("shop_orders").select("account_id,created_at,price").eq("tenant_id", tid).eq("product_id", k.product_id).eq("key", k.key).order("id", { ascending: false }).limit(1).maybeSingle();
+        if (order.error) throw order.error;
+        let detail = "\nSale details unavailable";
+        if (order.data) {
+          const account = await db.from("bot_accounts").select("username").eq("tenant_id", tid).eq("id", order.data.account_id).maybeSingle();
+          if (account.error) throw account.error;
+          detail = `\nBuyer: <b>${escapeHtml(account.data?.username ?? "Unavailable")}</b> · Paid: <b>${money(order.data.price)}</b>\nDate: ${fmtDate(order.data.created_at)}`;
+        }
+        lines.push(`<code>${escapeHtml(k.key)}</code>${detail}\n`);
       }
     }
-    lines.push(`⏱ ${escapeHtml(plainLabel(v.name))} · ${k.sold ? "✅ sold" : "🟢"} <code>${escapeHtml(k.key)}</code>${detail}`);
   }
-  if (!ks?.length) lines.push("No keys.");
+  if (!ks?.length) lines.push("\nNo keys in this product yet.");
   return { lines, page, pages };
 }
 
