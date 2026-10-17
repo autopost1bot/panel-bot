@@ -60,6 +60,7 @@ type Step =
   | { s: "var_confirm"; pid: number; label: string; price: number }
   | { s: "set_price"; pid: number } | { s: "set_cost"; pid: number } | { s: "set_name"; pid: number }
   | { s: "set_desc"; pid: number } | { s: "add_keys"; pid: number }
+  | { s: "stock_keys"; pid: number } | { s: "stock_review"; pid: number; keys: string[]; request: string }
   | { s: "cat_new"; then: "add" | "list" } | { s: "cat_name"; cid: number }
   | { s: "acc_user" } | { s: "acc_pass"; username: string } | { s: "bal_add" }
   | { s: "broadcast" } | { s: "welcome" } | { s: "support" } | { s: "aff_amount" } | { s: "aff_cu" } | { s: "aff_ca"; acc: number; name: string } | { s: "rm_user" }
@@ -628,7 +629,7 @@ async function startWelcome(ctx: Ctx, reply: (h: string, e?: any) => any) {
 
 async function ask(ctx: Ctx, reply: (h: string, e?: any) => any, step: Step, text: string, extra?: any) {
   ctx.session.step = step;
-  if (["var_confirm", "add_keys"].includes(step.s)) {
+  if (["var_confirm", "add_keys", "stock_keys"].includes(step.s)) {
     await reply(text, extra ?? {});
     return;
   }
@@ -960,6 +961,19 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply("✅ Saved.", kb([btn("⬅️ Back", `a:p:${step.pid}`)]));
       return;
     }
+    case "stock_keys":
+    case "stock_review": {
+      if (!ctx.isBoss) return;
+      const p = await getProduct(db, bot.tenantId, step.pid);
+      if (!p || p.nvars) { ctx.session.step = null; return stockView(ctx, reply); }
+      const keys = raw.split(/\r?\n/).map(k => k.trim()).filter(Boolean);
+      if (!keys.length) return stockKeyPrompt(ctx, reply, step.pid);
+      ctx.session.step = { s: "stock_review", pid: step.pid, keys, request: `stock:${ctx.requestId}` };
+      await reply(`📦 <b>Review stock</b>\n\n${await stockSelectionLabel(db, bot.tenantId, p)}\n🔢 Keys to add: <b>${keys.length}</b>\n📦 Available now: <b>${p.stock}</b>`, kb(
+        [btn("✅ Save", `a:stocksave:${step.pid}`)],
+        [btn("✏️ Edit keys", `a:stockkeys:${step.pid}`), btn("✖️ Cancel", "a:stock")]));
+      return;
+    }
     case "add_keys": {
       if (!ctx.isBoss) return;
       const { data: p } = await db.from("products").select("id").eq("id", step.pid).eq("tenant_id", bot.tenantId).maybeSingle();
@@ -1164,6 +1178,49 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (ap) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ap[1])); }
   if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : ctx.session.accountId ? shopMenu(ctx, reply) : handleText(ctx, reply, "/start", [], save); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
+
+  if (data === "a:stockadd" && own) {
+    ctx.session.step = null;
+    const ps = await topProducts(db, bot.tenantId, "all");
+    await reply("➕ <b>Add stock</b>\n\n📝 Choose product:", { ...kb(
+      ...ps.map(p => [btn(p.name, `a:stockprod:${p.id}`)]),
+      ...(ps.length ? [] : [[btn("➕ Add product", "a:add")]]),
+      [btn("⬅️ Back", "a:stock")]), noButtonColors: true });
+    return;
+  }
+  const stockProduct = own ? data.match(/^a:stockprod:(\d+)$/) : null;
+  if (stockProduct) {
+    ctx.session.step = null;
+    const pid = Number(stockProduct[1]);
+    const p = await getProduct(db, bot.tenantId, pid);
+    if (!p || p.parent_id) return stockView(ctx, reply);
+    const variants = await variantsOf(db, bot.tenantId, pid);
+    if (!variants.length) return stockKeyPrompt(ctx, reply, pid);
+    await reply(`➕ <b>Add stock</b>\n\n📝 Product: <b>${p.name}</b>\n⏱ Choose duration:`, { ...kb(
+      ...variants.map(v => [btn(`${v.name} · ${v.stock} available`, `a:stockkeys:${v.id}`)]),
+      [btn("⬅️ Back", "a:stockadd"), btn("✖️ Cancel", "a:stock")]), noButtonColors: true });
+    return;
+  }
+  const stockKeys = own ? data.match(/^a:stockkeys:(\d+)$/) : null;
+  if (stockKeys) return stockKeyPrompt(ctx, reply, Number(stockKeys[1]));
+  const stockSave = own ? data.match(/^a:stocksave:(\d+)$/) : null;
+  if (stockSave) {
+    const st = ctx.session.step;
+    if (st?.s !== "stock_review" || st.pid !== Number(stockSave[1])) return;
+    const p = await getProduct(db, bot.tenantId, st.pid);
+    if (!p || p.nvars) { ctx.session.step = null; return stockView(ctx, reply); }
+    const { error } = await db.rpc("add_bot_keys", { p_tenant: bot.tenantId, p_product: st.pid, p_keys: st.keys, p_request: st.request });
+    if (error) {
+      if (bot.durable) throw error;
+      await reply("❌ Stock was not saved. Please try again.", kb([btn("✅ Save", `a:stocksave:${st.pid}`)], [btn("✖️ Cancel", "a:stock")]));
+      return;
+    }
+    ctx.session.step = null;
+    await reply(`✅ <b>Stock added</b>\n\n${await stockSelectionLabel(db, bot.tenantId, p)}\n🔑 Added: <b>${st.keys.length}</b>\n📦 Available: <b>${await stockOf(db, bot.tenantId, st.pid)}</b>`, kb(
+      [btn("➕ Add more keys", `a:stockkeys:${st.pid}`)],
+      [btn("📝 Choose product", "a:stockadd"), btn("📦 Stock", "a:stock")]));
+    return;
+  }
 
   // ── New-user approval (admin only)
   const apMatch = data.match(/^ap:(ok|no):(\d+)$/);
@@ -1669,7 +1726,22 @@ async function adminProduct(ctx: Ctx, reply: (h: string, e?: any) => any, pid: n
   }
 }
 
+async function stockSelectionLabel(db: any, tenantId: number, p: any): Promise<string> {
+  const parent = p.parent_id ? await getProduct(db, tenantId, Number(p.parent_id)) : null;
+  return `📝 Product: <b>${parent?.name ?? p.name}</b>${parent ? `\n⏱ Duration: <b>${p.name}</b>` : ""}`;
+}
+
+async function stockKeyPrompt(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number) {
+  const db = await getDb();
+  const p = await getProduct(db, ctx.bot.tenantId, pid);
+  if (!p || p.nvars) { ctx.session.step = null; return stockView(ctx, reply); }
+  return ask(ctx, reply, { s: "stock_keys", pid },
+    `➕ <b>Add stock</b>\n\n${await stockSelectionLabel(db, ctx.bot.tenantId, p)}\n📦 Available: <b>${p.stock}</b>\n\n📝 Send keys, one per line:\n\n<code>DEMO-KEY1</code>\n\n<code>DEMO-KEY2</code>`,
+    kb([btn("⬅️ Back", p.parent_id ? `a:stockprod:${p.parent_id}` : "a:stockadd"), btn("✖️ Cancel", "a:stock")]));
+}
+
 async function stockView(ctx: Ctx, reply: (h: string, e?: any) => any) {
+  ctx.session.step = null;
   const db = await getDb();
   const ps = await topProducts(db, ctx.bot.tenantId, "all");
   if (!ps.length) { await reply("📦 No products yet.", kb([btn("➕ Add product", "a:add")], [btn("⬅️ Back", "a:home")])); return; }
@@ -1683,7 +1755,7 @@ async function stockView(ctx: Ctx, reply: (h: string, e?: any) => any) {
       out += `\n${titlePrefix("🛒", p.name)}<b>${p.name}</b>: <b>${p.stock}</b>${Number(p.stock) ? "" : " ❌"}\n`;
     }
   }
-  await reply(out, kb([btn("⬅️ Back", "a:home")]));
+  await reply(out, kb([btn("➕ Add stock", "a:stockadd")], [btn("⬅️ Back", "a:home")]));
 }
 
 const USERS_PER_PAGE = 10;
