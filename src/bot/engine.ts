@@ -1830,7 +1830,7 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
     await reply("🔐 Please log in first.\nSend your <b>username</b>:", kb([btn("✖️ Cancel", "x:cancel")]));
     return;
   }
-  // Go back returns to the bought product's duration list (its parent when a variant was bought).
+  // A failed purchase returns to the bought product's duration list (its parent when a variant was bought).
   const { data: bought } = await db.from("products").select("parent_id").eq("id", pid).eq("tenant_id", ctx.bot.tenantId).maybeSingle();
   const backTo = bought?.parent_id ? `c:p:${bought.parent_id}` : `c:p:${pid}`;
   const { data, error } = await db.rpc("buy_keys_once", { p_tenant: ctx.bot.tenantId, p_account: acc.id, p_product: pid, p_qty: qty, p_request: ctx.requestId });
@@ -1865,7 +1865,6 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
   }
   receipts.push(receipt + footer);
   const navigation = kb(
-    [btn("⬅️ Go back", backTo)],
     [btn("🧾 Order history", "c:orders"), btn("🏠 Menu", "c:home")]);
   for (let index = 0; index < receipts.length; index++) {
     const message = receipts[index];
