@@ -7,7 +7,7 @@
 import { getDb, hashPassword } from "./db";
 import { affiliateNotice, deliver } from "./reliability";
 import {
-  btn, entitiesToHtml, escapeHtml, fmtDate, kb, money, plainLabel,
+  btn, copyBtn, entitiesToHtml, escapeHtml, fmtDate, kb, money, plainLabel,
   editHtml, sendHtml, tgCall, urlBtn, webhookSecret, type TgEntity,
 } from "./tg";
 
@@ -2102,13 +2102,21 @@ function paymentMinutesLeft(createdAt: string): number {
   return Math.max(1, Math.ceil((new Date(createdAt).getTime() + PAYMENT_TTL_MS - Date.now()) / 60000));
 }
 
-function paymentKb(id: number, withCancel: boolean): any {
-  return kb(
-    [btn("✅ I've paid", `pay:check:${id}`)],
+function paymentKb(id: number, withCancel: boolean, wallet?: string, amount?: number): any {
+  const rows: any[][] = [[btn("✅ I've paid", `pay:check:${id}`)]];
+  // Native Telegram copy buttons — one tap copies to the clipboard.
+  if (wallet && wallet !== "—") {
+    rows.push([
+      ...(amount != null ? [copyBtn("📋 Copy amount", amount.toFixed(2))] : []),
+      copyBtn("📋 Copy address", wallet),
+    ]);
+  }
+  rows.push(
     withCancel
       ? [btn("🔄 Refresh", `pay:refresh:${id}`), btn("❌ Cancel", `pay:cancel:${id}`)]
       : [btn("🔄 Refresh", `pay:refresh:${id}`), btn("🏠 Menu", "c:home")],
   );
+  return kb(...rows);
 }
 
 /** If the account already has an open invoice, show it again instead of
@@ -2121,7 +2129,7 @@ async function showOpenPayment(ctx: Ctx, reply: (h: string, e?: any) => any): Pr
   const wallet = await getWallet(net);
   const left = paymentMinutesLeft(p.created_at);
   ctx.session.step = null;
-  await reply(`⏳ <b>You already have a pending payment.</b>\nPlease complete it first — a new order can be created after it is paid or expires in <b>${left} min</b>.\n\n` + paymentText(p, wallet ?? "—", net, left), paymentKb(p.id, false));
+  await reply(`⏳ <b>You already have a pending payment.</b>\nPlease complete it first — a new order can be created after it is paid or expires in <b>${left} min</b>.\n\n` + paymentText(p, wallet ?? "—", net, left), paymentKb(p.id, false, wallet ?? "—", p.amount));
   return true;
 }
 
@@ -2134,7 +2142,7 @@ async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, 
   if (!wallet) { await reply(`⚠️ USDT (${NETWORK_LABEL[net]}) payments are not available yet. Please ask the admin.`); return; }
   const p = await createPayment(ctx.session.accountId!, ctx.tgId, kind, baseAmount, net);
   if (!p) { await reply("⚠️ Could not create the payment. Please try again."); return; }
-  await reply(paymentText(p, wallet, net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, true));
+  await reply(paymentText(p, wallet, net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, true, wallet, p.amount));
 }
 
 function paymentText(p: CryptoPayment, wallet: string, net: Network = "bep20", minutesLeft?: number): string {
@@ -2187,7 +2195,7 @@ async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, dat
     if (p.status !== "pending") { await reply(p.status === "paid" ? "✅ Payment confirmed!" : "⌛ This payment has expired. Please start a new one."); return; }
     const net = (p.network ?? "bep20") as Network;
     const wallet = await getWallet(net);
-    await reply(paymentText(p, wallet ?? "—", net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, true));
+    await reply(paymentText(p, wallet ?? "—", net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, true, wallet ?? "—", p.amount));
     return;
   }
   if ((m = data.match(/^pay:check:(\d+)$/))) {
