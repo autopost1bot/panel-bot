@@ -2060,6 +2060,57 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
 
 // ─── Crypto payments (BEP20 USDT, main bot only) ─────────────────────────────
 
+// Order spam guard: cancelling 4 orders in one day blocks new orders for 12h.
+const MAX_DAILY_CANCELS = 4;
+const ORDER_BLOCK_MS = 12 * 3600 * 1000;
+
+/** Minutes left on the account's order block (0 = not blocked). */
+async function orderBlockMinutes(db: any, accountId: number): Promise<number> {
+  const { data } = await db.from("bot_order_guards").select("blocked_until").eq("account_id", accountId).maybeSingle();
+  if (!data?.blocked_until) return 0;
+  const ms = new Date(data.blocked_until).getTime() - Date.now();
+  return ms > 0 ? Math.ceil(ms / 60000) : 0;
+}
+
+function orderBlockText(waitMin: number): string {
+  const h = Math.floor(waitMin / 60);
+  const m = waitMin % 60;
+  const left = h > 0 ? `${h}h ${m}min` : `${m}min`;
+  return `⛔️ <b>Too many cancelled orders.</b>\n\nYou cancelled ${MAX_DAILY_CANCELS} orders today, so new orders are blocked for <b>${left}</b>. Please try again after that.`;
+}
+
+/** Records one cancelled order. Returns the day's cancel count and whether
+ *  this cancel just triggered the 12-hour block. */
+async function registerOrderCancel(db: any, accountId: number): Promise<{ count: number; blocked: boolean }> {
+  const today = new Date().toISOString().slice(0, 10);
+  const { data } = await db.from("bot_order_guards").select("*").eq("account_id", accountId).maybeSingle();
+  let count = data && data.cancel_day === today ? Number(data.cancel_count) + 1 : 1;
+  let blockedUntil: string | null = data?.blocked_until ?? null;
+  let blocked = false;
+  if (count >= MAX_DAILY_CANCELS) {
+    blockedUntil = new Date(Date.now() + ORDER_BLOCK_MS).toISOString();
+    count = 0;
+    blocked = true;
+  }
+  const { error } = await db.from("bot_order_guards").upsert({ account_id: accountId, cancel_day: today, cancel_count: count, blocked_until: blockedUntil }, { onConflict: "account_id" });
+  if (error) throw error;
+  return { count, blocked };
+}
+
+/** Remaining minutes for a pending payment (never below 1). */
+function paymentMinutesLeft(createdAt: string): number {
+  return Math.max(1, Math.ceil((new Date(createdAt).getTime() + PAYMENT_TTL_MS - Date.now()) / 60000));
+}
+
+function paymentKb(id: number, withCancel: boolean): any {
+  return kb(
+    [btn("✅ I've paid", `pay:check:${id}`)],
+    withCancel
+      ? [btn("🔄 Refresh", `pay:refresh:${id}`), btn("❌ Cancel", `pay:cancel:${id}`)]
+      : [btn("🔄 Refresh", `pay:refresh:${id}`), btn("🏠 Menu", "c:home")],
+  );
+}
+
 /** If the account already has an open invoice, show it again instead of
  *  allowing a new one (anti-spam: one invoice per user for 20 minutes). */
 async function showOpenPayment(ctx: Ctx, reply: (h: string, e?: any) => any): Promise<boolean> {
@@ -2068,32 +2119,29 @@ async function showOpenPayment(ctx: Ctx, reply: (h: string, e?: any) => any): Pr
   if (!p) return false;
   const net = ((p as any).network ?? "bep20") as Network;
   const wallet = await getWallet(net);
-  const left = Math.max(1, Math.ceil((new Date(p.created_at).getTime() + PAYMENT_TTL_MS - Date.now()) / 60000));
+  const left = paymentMinutesLeft(p.created_at);
   ctx.session.step = null;
-  await reply(`⏳ <b>You already have a pending payment.</b>\nPlease complete it first — a new order can be created after it is paid or expires in <b>${left} min</b>.\n\n` + paymentText(p, wallet ?? "—", net, left), kb(
-    [btn("✅ I've paid", `pay:check:${p.id}`)],
-    [btn("🏠 Menu", "c:home")],
-  ));
+  await reply(`⏳ <b>You already have a pending payment.</b>\nPlease complete it first — a new order can be created after it is paid or expires in <b>${left} min</b>.\n\n` + paymentText(p, wallet ?? "—", net, left), paymentKb(p.id, false));
   return true;
 }
 
 async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "topup" | "sub", baseAmount: number, net: Network = "bep20") {
   if (await showOpenPayment(ctx, reply)) return;
+  const db = await getDb();
+  const wait = await orderBlockMinutes(db, ctx.session.accountId!);
+  if (wait > 0) { await reply(orderBlockText(wait)); return; }
   const wallet = await getWallet(net);
   if (!wallet) { await reply(`⚠️ USDT (${NETWORK_LABEL[net]}) payments are not available yet. Please ask the admin.`); return; }
   const p = await createPayment(ctx.session.accountId!, ctx.tgId, kind, baseAmount, net);
   if (!p) { await reply("⚠️ Could not create the payment. Please try again."); return; }
-  await reply(paymentText(p, wallet, net, Math.round(PAYMENT_TTL_MS / 60000)), kb(
-    [btn("✅ I've paid", `pay:check:${p.id}`)],
-    [btn("❌ Cancel", `pay:cancel:${p.id}`)],
-  ));
+  await reply(paymentText(p, wallet, net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, true));
 }
 
 function paymentText(p: CryptoPayment, wallet: string, net: Network = "bep20", minutesLeft?: number): string {
   const L = NETWORK_LABEL[net];
   return `💳 <b>Pay with USDT (${L})</b>\n\n` +
     `Send <b>exactly</b> this amount:\n<code>${p.amount.toFixed(2)}</code> USDT\n\n` +
-    `To this address (${NETWORK_CHAIN[net]}):\n<code>${escapeHtml(wallet)}</code>\n\n` +
+    `To this address (${NETWORK_CHAIN[net]}) — tap to copy:\n<code>${escapeHtml(wallet)}</code>\n\n` +
     `⚠️ Send only <b>USDT on ${L}</b> — any other network or token is lost forever.\n` +
     `The exact amount (with the cents) identifies your payment.\n\n` +
     `✅ Your payment is verified automatically within a minute — no need to send any proof.` +
@@ -2121,9 +2169,25 @@ async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, dat
   }
   if ((m = data.match(/^pay:cancel:(\d+)$/))) {
     // Anti-spam: the invoice stays open until paid or expired (20 min), so
-    // cancelling cannot be used to create order after order.
+    // cancelling cannot be used to create order after order. Cancelling 4
+    // orders in one day blocks new orders for 12 hours.
     ctx.session.step = null;
-    await reply("ℹ️ This order stays open for 20 minutes. If you send the exact amount it is still credited; otherwise it expires automatically and you can create a new one.", kb([btn("🏠 Menu", "c:home")]));
+    if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    const guard = await registerOrderCancel(db, ctx.session.accountId);
+    if (guard.blocked) { await reply(orderBlockText(ORDER_BLOCK_MS / 60000)); return; }
+    await reply(
+      `ℹ️ This order stays open for 20 minutes. If you send the exact amount it is still credited; otherwise it expires automatically and you can create a new one.\n\n⚠️ Cancelled orders today: <b>${guard.count}/${MAX_DAILY_CANCELS}</b> — after ${MAX_DAILY_CANCELS} cancels, new orders are blocked for 12 hours.`,
+      kb([btn("🏠 Menu", "c:home")]));
+    return;
+  }
+  if ((m = data.match(/^pay:refresh:(\d+)$/))) {
+    const id = Number(m[1]);
+    const { data: p } = await db.from("crypto_payments").select("*").eq("id", id).maybeSingle();
+    if (!p || p.account_id !== ctx.session.accountId) { await reply("❌ Payment not found."); return; }
+    if (p.status !== "pending") { await reply(p.status === "paid" ? "✅ Payment confirmed!" : "⌛ This payment has expired. Please start a new one."); return; }
+    const net = (p.network ?? "bep20") as Network;
+    const wallet = await getWallet(net);
+    await reply(paymentText(p, wallet ?? "—", net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, true));
     return;
   }
   if ((m = data.match(/^pay:check:(\d+)$/))) {
