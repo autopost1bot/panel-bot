@@ -217,7 +217,6 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   // Button taps edit the tapped message in place (no new message per step);
   // later replies in the same update (e.g. long lists) still send fresh ones.
   const cqMsgId: number | null = cq?.message?.message_id ?? null;
-  (ctx as any).__receiptMessageId = cqMsgId;
   let navigated = false;
   const reply = async (html: string, extra: Record<string, unknown> = {}) => {
     html = themeHtml(html, ctx.emoji);
@@ -1957,8 +1956,9 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
   for (let index = 0; index < receipts.length; index++) {
     const message = receipts[index];
     if (message === undefined) continue;
-    await deliver(ctx.bot, ctx.chatId, themeHtml(message, ctx.emoji), themeExtra({ ...(index === receipts.length - 1 ? navigation : {}), ...(index === 0 && (ctx as any).__receiptMessageId ? { receiptMessageId: (ctx as any).__receiptMessageId } : {}) }, ctx.emoji), `receipt:${ctx.bot.tenantId}:${ctx.requestId}:${index}`);
+    await deliver(ctx.bot, ctx.chatId, themeHtml(message, ctx.emoji), {}, `receipt:${ctx.bot.tenantId}:${ctx.requestId}:${index}`);
   }
+  await deliver(ctx.bot, ctx.chatId, themeHtml("🧾 <b>Order history</b> · 🏠 <b>Menu</b>", ctx.emoji), themeExtra(navigation, ctx.emoji), `receipt-navigation:${ctx.bot.tenantId}:${ctx.requestId}`);
   const owner = ctx.bot.isMain ? ctx.bot.adminTgIds[0] : ctx.bot.ownerTgId;
   if (owner && owner !== ctx.tgId) await sendHtml(ctx.bot.token, owner, `🛒 New order: ${escapeHtml(res.label)} × ${qty} — ${money(res.total)} by ${escapeHtml(acc.username)}`).catch(() => {});
 }
