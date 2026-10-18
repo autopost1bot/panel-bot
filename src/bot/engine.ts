@@ -1186,6 +1186,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   const { bot } = ctx;
   const db = await getDb();
   const own = ctx.isBoss;
+  let m: RegExpMatchArray | null;
 
   const ak = own ? data.match(/^x:ak:(\d+)$/) : null;
   if (ak) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ak[1])); }
@@ -1194,12 +1195,14 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : ctx.session.accountId ? shopMenu(ctx, reply) : handleText(ctx, reply, "/start", [], save); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
 
-  if (data === "a:stockadd" && own) {
+  if ((m = data.match(/^a:stockadd(?::(\d+))?$/)) && own) {
     ctx.session.step = null;
     const ps = await topProducts(db, bot.tenantId, "all");
-    await reply("➕ <b>Add stock</b>\n\n📝 Choose product:", { ...kb(
-      ...ps.map(p => [btn(p.name, `a:stockprod:${p.id}`)]),
+    const { items, page, pages } = pageSlice(ps, Number(m[1] ?? 0));
+    await reply(`➕ <b>Add stock</b>\n\n📝 Choose product:${pageLabel(page, pages)}`, { ...kb(
+      ...items.map(p => [btn(p.name, `a:stockprod:${p.id}`)]),
       ...(ps.length ? [] : [[btn("➕ Add product", "a:add")]]),
+      ...pageNav("a:stockadd", page, pages),
       [btn("⬅️ Back", "a:stock")]), noButtonColors: true });
     return;
   }
@@ -1346,7 +1349,6 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
       [btn("➕ New category", "a:catnew:add")], [btn("⬅️ Back", "a:home")]));
     return;
   }
-  let m: RegExpMatchArray | null;
   if ((m = data.match(/^a:addc:(\d+)$/)) && own) return ask(ctx, reply, { s: "add_name", cat: Number(m[1]) }, "📝 Type product name:");
   if ((m = data.match(/^a:pre:(\d+):(\d+)$/)) && own) {
     const label = PRESETS.find(([d]) => d === m![2])?.[1] ?? `${m[2]} Days`;
@@ -1368,21 +1370,26 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return;
   }
 
-  if (data === "a:cats" && own) {
+  if ((m = data.match(/^a:cats(?::(\d+))?$/)) && own) {
     const cs = await categories(db, bot.tenantId);
-    await reply("📂 <b>Categories</b>" + (cs.length ? "" : "\n\nNone yet."), kb(
-      ...cs.map((c) => [btn(`${c.name} (${c.n})`, `a:c:${c.id}`)]),
+    if (!cs.length) { await reply("📂 <b>Categories</b>\n\nNone yet.", kb([btn("➕ New category", "a:catnew:list")], [btn("⬅️ Back", "a:home")])); return; }
+    const { items, page, pages } = pageSlice(cs, Number(m[1] ?? 0));
+    await reply(`📂 <b>Categories</b>${pageLabel(page, pages)}`, kb(
+      ...items.map((c) => [btn(`${c.name} (${c.n})`, `a:c:${c.id}`)]),
+      ...pageNav("a:cats", page, pages),
       [btn("➕ New category", "a:catnew:list")], [btn("⬅️ Back", "a:home")]));
     return;
   }
   if ((m = data.match(/^a:catnew:(add|list)$/)) && own) return ask(ctx, reply, { s: "cat_new", then: m[1] as "add" | "list" }, "📂 Send the category name (premium emoji allowed):");
-  if ((m = data.match(/^a:c:(\d+)$/)) && own) {
+  if ((m = data.match(/^a:c:(\d+)(?::(\d+))?$/)) && own) {
     const cid = Number(m[1]);
     const { data: c } = await db.from("categories").select("*").eq("id", cid).eq("tenant_id", bot.tenantId).maybeSingle();
     if (!c) return;
     const ps = await topProducts(db, bot.tenantId, cid);
-    await reply(`${titlePrefix("📂", c.name)}<b>${c.name}</b>\n${ps.length} product(s)`, kb(
-      ...ps.map((p) => [btn(`${p.name} · ${priceLabel(p)} · stock ${p.stock}`, `a:p:${p.id}`)]),
+    const { items, page, pages } = pageSlice(ps, Number(m[2] ?? 0));
+    await reply(`${titlePrefix("📂", c.name)}<b>${c.name}</b>\n${ps.length} product(s)${pageLabel(page, pages)}`, kb(
+      ...items.map((p) => [btn(`${p.name} · ${priceLabel(p)} · stock ${p.stock}`, `a:p:${p.id}`)]),
+      ...pageNav(`a:c:${cid}`, page, pages),
       [btn("➕ Add product here", `a:addc:${cid}`)],
       [btn("✏️ Rename", `a:cn:${cid}`), btn("🗑 Delete", `a:cdel:${cid}`)], [btn("⬅️ Categories", "a:cats")]));
     return;
@@ -1409,13 +1416,15 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return;
   }
 
-  if (data === "a:list" && own) {
+  if ((m = data.match(/^a:list(?::(\d+))?$/)) && own) {
     const ps = await topProducts(db, bot.tenantId, "all");
     if (!ps.length) { await reply("No products yet.", kb([btn("➕ Add product", "a:add")], [btn("⬅️ Back", "a:home")])); return; }
     const cs = await categories(db, bot.tenantId);
     const catName = (id: number | null) => cs.find((c) => c.id === id)?.name;
-    await reply("📦 <b>Products</b>", kb(
-      ...ps.map((p) => [btn(`${p.category_id ? plainLabel(catName(p.category_id) ?? "") + " › " : ""}${p.name} · ${priceLabel(p)} · stock ${p.stock}`, `a:p:${p.id}`)]),
+    const { items, page, pages } = pageSlice(ps, Number(m[1] ?? 0));
+    await reply(`📦 <b>Products</b>${pageLabel(page, pages)}`, kb(
+      ...items.map((p) => [btn(`${p.category_id ? plainLabel(catName(p.category_id) ?? "") + " › " : ""}${p.name} · ${priceLabel(p)} · stock ${p.stock}`, `a:p:${p.id}`)]),
+      ...pageNav("a:list", page, pages),
       [btn("➕ Add product", "a:add"), btn("⬅️ Back", "a:home")]));
     return;
   }
@@ -1509,7 +1518,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return;
   }
   if (data === "a:wel" && own) return ask(ctx, reply, { s: "welcome" }, "👋 Send the new welcome text (premium emoji allowed):\n\nUse <code>{name}</code> where the account name should appear.");
-  if (data === "a:stock" && own) return stockView(ctx, reply);
+  if ((m = data.match(/^a:stock(?::(\d+))?$/)) && own) return stockView(ctx, reply, Number(m[1] ?? 0));
 
   // ── One-click hide/show prices for customers
   if (data === "a:hide" && own) {
@@ -1520,7 +1529,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   }
 
   // ── Per-account custom prices
-  if ((m = data.match(/^a:cp:(\d+)$/)) && own) {
+  if ((m = data.match(/^a:cp:(\d+)(?::(\d+))?$/)) && own) {
     const cid = Number(m[1]);
     const { data: c } = await db.from("bot_accounts").select("username").eq("id", cid).eq("tenant_id", bot.tenantId).maybeSingle();
     if (!c) return;
@@ -1535,8 +1544,9 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
         rows.push([btn(`${label} · ${cp !== undefined ? "⭐ " + money(cp) : money(v.price)}`, `a:cps:${cid}:${v.id}`)]);
       }
     }
-    await reply(`💲 <b>Custom prices for ${escapeHtml(c.username)}</b>\n\nTap a key type to set a special price for this account.\n⭐ = custom price, others use the default price.`,
-      kb(...rows, [btn("⬅️ Account", `a:m:${cid}`)]));
+    const { items, page, pages } = pageSlice(rows, Number(m[2] ?? 0));
+    await reply(`💲 <b>Custom prices for ${escapeHtml(c.username)}</b>\n\nTap a key type to set a special price for this account.\n⭐ = custom price, others use the default price.${pageLabel(page, pages)}`,
+      kb(...items, ...pageNav(`a:cp:${cid}`, page, pages), [btn("⬅️ Account", `a:m:${cid}`)]));
     return;
   }
   if ((m = data.match(/^a:cps:(\d+):(\d+)$/)) && own) {
@@ -1544,13 +1554,16 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   }
 
   // ── Main admin: view every reseller bot's catalog & keys
-  if (data === "a:tb" && own && bot.isMain) {
+  const tbp = data.match(/^a:tbl:(\d+)$/);
+  if ((data === "a:tb" || tbp) && own && bot.isMain) {
     const { data: ts } = await db.from("tenant_bots").select("id, bot_username, owner_account_id, status, expires_at").order("id");
     const ids = (ts ?? []).map((t: any) => t.owner_account_id);
     const { data: accs } = ids.length ? await db.from("bot_accounts").select("id, username").in("id", ids) : { data: [] };
     const nameOf = (id: number) => (accs ?? []).find((a: any) => a.id === id)?.username ?? "?";
-    await reply(`🤖 <b>Reseller bots</b> (${(ts ?? []).length})`, kb(
-      ...(ts ?? []).map((t: any) => [btn(`${t.status === "active" ? "🟢" : "🔴"} ${plainLabel(nameOf(t.owner_account_id))}${t.bot_username ? " · @" + t.bot_username : ""}`, `a:tb:${t.id}`)]),
+    const { items, page, pages } = pageSlice(ts ?? [], tbp ? Number(tbp[1]) : 0);
+    await reply(`🤖 <b>Reseller bots</b> (${(ts ?? []).length})${pageLabel(page, pages)}`, kb(
+      ...items.map((t: any) => [btn(`${t.status === "active" ? "🟢" : "🔴"} ${plainLabel(nameOf(t.owner_account_id))}${t.bot_username ? " · @" + t.bot_username : ""}`, `a:tb:${t.id}`)]),
+      ...pageNav("a:tbl", page, pages),
       [btn("⬅️ Back", "a:home")]));
     return;
   }
@@ -1611,38 +1624,48 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (data === "aff:menu" && bot.isMain) return affiliateMenu(ctx, reply);
   if (data.startsWith("a:aff") && own && bot.isMain) return affiliateAdmin(ctx, reply, data);
   if (data === "c:home") return own ? adminMenu(ctx, reply) : shopMenu(ctx, reply);
-  if (data === "c:shop") return own ? ownerShop(ctx, reply) : shopCustomer(ctx, reply);
-  if ((m = data.match(/^c:cat:(\d+)$/))) {
+  const sm = data.match(/^c:shop:(\d+)$/);
+  if (data === "c:shop" || sm) return own ? ownerShop(ctx, reply, sm ? Number(sm[1]) : 0) : shopCustomer(ctx, reply, sm ? Number(sm[1]) : 0);
+  if ((m = data.match(/^c:cat:(\d+)(?::(\d+))?$/))) {
     const cid = Number(m[1]) || null;
+    const requested = Number(m[2] ?? 0);
     const ps = await topProducts(db, bot.tenantId, cid);
     const { data: c } = cid ? await db.from("categories").select("name").eq("id", cid).eq("tenant_id", bot.tenantId).maybeSingle() : { data: { name: "Other" } };
+    const { items, page, pages } = pageSlice(ps, requested);
     if (own) {
-      await reply(`📋 Choose a product in category <b>${c?.name ?? ""}</b>:`, kb(
+      await reply(`📋 Choose a product in category <b>${c?.name ?? ""}</b>:${pageLabel(page, pages)}`, kb(
         [btn("➕ Add position", `a:addc:${cid ?? 0}`), ...(cid ? [btn("🗑 Delete category", `a:cdel:${cid}`)] : [])],
-        ...ps.map((p) => [btn(`${p.name}${Number(p.nvars) ? "" : " – " + money(p.price)}`, `c:p:${p.id}`)]), [btn("⬅️ Go back", "c:shop")]));
+        ...items.map((p) => [btn(`${p.name}${Number(p.nvars) ? "" : " – " + money(p.price)}`, `c:p:${p.id}`)]),
+        ...pageNav(`c:cat:${cid ?? 0}`, page, pages),
+        [btn("⬅️ Go back", "c:shop")]));
       return;
     }
-    await reply(`${titlePrefix("📂", c?.name ?? "")}<b>${c?.name ?? ""}</b>\nChoose a product:`, kb(...productButtons(ps), [btn("⬅️ Back", "c:shop")]));
+    await reply(`${titlePrefix("📂", c?.name ?? "")}<b>${c?.name ?? ""}</b>\nChoose a product:${pageLabel(page, pages)}`, kb(...productButtons(items), ...pageNav(`c:cat:${cid ?? 0}`, page, pages), [btn("⬅️ Back", "c:shop")]));
     return;
   }
-  if ((m = data.match(/^c:p:(\d+)$/))) {
+  if ((m = data.match(/^c:p:(\d+)(?::(\d+))?$/))) {
     const pid = Number(m[1]);
+    const requested = Number(m[2] ?? 0);
     const p = await getProduct(db, bot.tenantId, pid);
     if (!p) return;
     const back = p.parent_id ? `c:p:${p.parent_id}` : p.category_id ? `c:cat:${p.category_id}` : "c:shop";
     if (own) {
       if (p.parent_id) return adminProduct(ctx, reply, pid);
       const vars = await variantsOf(db, bot.tenantId, pid);
-      await reply(`📋 Choose a key type for <b>${p.name}</b>:`, kb(
+      const { items, page, pages } = pageSlice(vars, requested);
+      await reply(`📋 Choose a key type for <b>${p.name}</b>:${pageLabel(page, pages)}`, kb(
         [btn("➕ Add key type", `a:v:${pid}`), btn("🗑 Delete position", `a:del:${pid}`)],
-        ...vars.map((v) => [btn(`${v.name} – ${money(v.price)}`, `c:p:${v.id}`)]),
+        ...items.map((v) => [btn(`${v.name} – ${money(v.price)}`, `c:p:${v.id}`)]),
+        ...pageNav(`c:p:${pid}`, page, pages),
         [btn("⬅️ Go back", back)]));
       return;
     }
     if (!p.parent_id && Number(p.nvars)) {
       const vars = await variantsOf(db, bot.tenantId, pid);
-      await reply(`${p.name}\n${p.description ? "\n" + p.description + "\n" : ""}\n⏱ Choose a key type:`, kb(
-        ...vars.map((v) => [btn(`${v.name} – ${pr(ctx, v)}${v.stock ? "" : " (out of stock)"}`, `c:p:${v.id}`)]), [btn("⬅️ Back", back)]));
+      const { items, page, pages } = pageSlice(vars, requested);
+      await reply(`${p.name}\n${p.description ? "\n" + p.description + "\n" : ""}\n⏱ Choose a key type:${pageLabel(page, pages)}`, kb(
+        ...items.map((v) => [btn(`${v.name} – ${pr(ctx, v)}${v.stock ? "" : " (out of stock)"}`, `c:p:${v.id}`)]),
+        ...pageNav(`c:p:${pid}`, page, pages), [btn("⬅️ Back", back)]));
       return;
     }
     await reply(`${await fullName(db, bot.tenantId, p)}\n${p.description ? "\n" + p.description + "\n" : ""}\n💵 Price: <b>${pr(ctx, p)}</b>\n📦 In stock: ${p.stock}`,
@@ -1668,6 +1691,21 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
 }
 
 const productButtons = (ps: any[]) => ps.map((p) => [btn(p.name, `c:p:${p.id}`)]);
+
+// ─── List pagination: 10 items per page with Previous/Next ───────────────────
+const LIST_PER_PAGE = 10;
+function pageSlice<T>(items: T[], requested: number): { items: T[]; page: number; pages: number } {
+  const pages = Math.max(1, Math.ceil(items.length / LIST_PER_PAGE));
+  const page = Math.min(Math.max(0, requested || 0), pages - 1);
+  return { items: items.slice(page * LIST_PER_PAGE, page * LIST_PER_PAGE + LIST_PER_PAGE), page, pages };
+}
+function pageNav(prefix: string, page: number, pages: number): any[][] {
+  const nav: any[] = [];
+  if (page > 0) nav.push(btn("⬅️ Previous", `${prefix}:${page - 1}`));
+  if (page + 1 < pages) nav.push(btn("Next ➡️", `${prefix}:${page + 1}`));
+  return nav.length ? [nav] : [];
+}
+const pageLabel = (page: number, pages: number) => (pages > 1 ? ` · Page ${page + 1}/${pages}` : "");
 
 async function variantPrompt(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number) {
   return ask(ctx, reply, { s: "add_vars", pid }, "⏱ Enter the duration (e.g. 1 Day, 7 Days):");
@@ -1771,14 +1809,15 @@ async function stockKeyPrompt(ctx: Ctx, reply: (h: string, e?: any) => any, pid:
     kb([btn("⬅️ Back", p.parent_id ? `a:stockprod:${p.parent_id}` : "a:stockadd"), btn("✖️ Cancel", "a:stock")]));
 }
 
-async function stockView(ctx: Ctx, reply: (h: string, e?: any) => any) {
+async function stockView(ctx: Ctx, reply: (h: string, e?: any) => any, requested = 0) {
   ctx.session.step = null;
   const db = await getDb();
   const ps = await topProducts(db, ctx.bot.tenantId, "all");
   if (!ps.length) { await reply("📦 No products yet.", kb([btn("➕ Add product", "a:add")], [btn("⬅️ Back", "a:home")])); return; }
   const inStock = ps.filter((p) => Number(p.stock) > 0).length;
-  let out = `📦 <b>Current stock [${inStock}/${ps.length}]:</b>\n`;
-  for (const p of ps) {
+  const { items, page, pages } = pageSlice(ps, requested);
+  let out = `📦 <b>Current stock [${inStock}/${ps.length}]:</b>${pageLabel(page, pages)}\n`;
+  for (const p of items) {
     const vars = await variantsOf(db, ctx.bot.tenantId, Number(p.id));
     if (vars.length) {
       out += `\n${titlePrefix("🛒", p.name)}<b>${p.name}</b>\n` + vars.map((v) => `· ${v.name}: <b>${v.stock}</b>${Number(v.stock) ? "" : " ❌"}`).join("\n") + "\n";
@@ -1786,7 +1825,7 @@ async function stockView(ctx: Ctx, reply: (h: string, e?: any) => any) {
       out += `\n${titlePrefix("🛒", p.name)}<b>${p.name}</b>: <b>${p.stock}</b>${Number(p.stock) ? "" : " ❌"}\n`;
     }
   }
-  await reply(out, kb([btn("➕ Add stock", "a:stockadd")], [btn("⬅️ Back", "a:home")]));
+  await reply(out, kb([btn("➕ Add stock", "a:stockadd")], ...pageNav("a:stock", page, pages), [btn("⬅️ Back", "a:home")]));
 }
 
 const USERS_PER_PAGE = 10;
@@ -1898,16 +1937,20 @@ async function manageList(ctx: Ctx, reply: (h: string, e?: any) => any, requeste
   await reply(`${custom ? "💲 <b>Custom prices</b>\nChoose an account to set special prices:" : "👤 <b>Choose account to manage:</b>"}\nPage ${page + 1}/${pages}`, { ...kb(...(ctx.bot.isMain || custom ? [] : [[btn("➕ Add account", "a:acc")]]), ...rows, ...(nav.length ? [nav] : []), [btn("⬅️ Go back", custom ? "a:home" : "a:manage")]), noButtonColors: true });
 }
 
-async function ownerShop(ctx: Ctx, reply: (h: string, e?: any) => any) {
+async function ownerShop(ctx: Ctx, reply: (h: string, e?: any) => any, requested = 0) {
   const db = await getDb();
   const cs = await categories(db, ctx.bot.tenantId);
   const loose = await topProducts(db, ctx.bot.tenantId, null);
-  await reply("📋 Choose a category:", kb([btn("➕ Add category", "a:catnew:list")],
+  const entries: any[][] = [
     ...cs.map((c) => [btn(c.name, `c:cat:${c.id}`)]),
-    ...(loose.length ? [[btn("📄 Other", "c:cat:0")]] : []), [btn("⬅️ Go back", "a:home")]));
+    ...(loose.length ? [[btn("📄 Other", "c:cat:0")]] : []),
+  ];
+  const { items, page, pages } = pageSlice(entries, requested);
+  await reply(`📋 Choose a category:${pageLabel(page, pages)}`, kb([btn("➕ Add category", "a:catnew:list")],
+    ...items, ...pageNav("c:shop", page, pages), [btn("⬅️ Go back", "a:home")]));
 }
 
-async function shopCustomer(ctx: Ctx, reply: (h: string, e?: any) => any) {
+async function shopCustomer(ctx: Ctx, reply: (h: string, e?: any) => any, requested = 0) {
   if (!ctx.session.accountId) {
     ctx.session.step = { s: "login_user" };
     await reply("🔐 Please log in first.\nSend your <b>username</b>:", kb([btn("✖️ Cancel", "x:cancel")]));
@@ -1917,10 +1960,17 @@ async function shopCustomer(ctx: Ctx, reply: (h: string, e?: any) => any) {
   const cs = (await categories(db, ctx.bot.tenantId)).filter((c) => Number(c.n) > 0);
   const loose = await topProducts(db, ctx.bot.tenantId, null);
   if (!cs.length && !loose.length) { await reply("🛍 No products yet.", kb([btn("⬅️ Back", "c:home")])); return; }
-  if (!cs.length) { await reply("🛍 <b>Choose a product</b>", kb(...productButtons(loose), [btn("⬅️ Back", "c:home")])); return; }
-  await reply("📂 <b>Choose a category</b>", kb(
+  if (!cs.length) {
+    const { items, page, pages } = pageSlice(loose, requested);
+    await reply(`🛍 <b>Choose a product</b>${pageLabel(page, pages)}`, kb(...productButtons(items), ...pageNav("c:shop", page, pages), [btn("⬅️ Back", "c:home")]));
+    return;
+  }
+  const entries: any[][] = [
     ...cs.map((c) => [btn(c.name, `c:cat:${c.id}`)]),
-    ...(loose.length ? [[btn("📄 Other", "c:cat:0")]] : []), [btn("⬅️ Back", "c:home")]));
+    ...(loose.length ? [[btn("📄 Other", "c:cat:0")]] : []),
+  ];
+  const { items, page, pages } = pageSlice(entries, requested);
+  await reply(`📂 <b>Choose a category</b>${pageLabel(page, pages)}`, kb(...items, ...pageNav("c:shop", page, pages), [btn("⬅️ Back", "c:home")]));
 }
 
 // ─── Purchase (atomic via Postgres function) ─────────────────────────────────
