@@ -48,6 +48,7 @@ export const COLOR_BUTTONS = [
   { id: "product_select", label: "Product / duration selection", actions: ["c:p:", "a:p:"] },
   { id: "previous", label: "Previous" },
   { id: "next", label: "Next" },
+  { id: "language", label: "Language", actions: ["lang", "lang:"] },
   { id: "emoji_icons", label: "Button & message icons", actions: ["a:emoji:icons", "a:emoji:icon:"] },
   { id: "emoji_products", label: "Product & duration emoji", actions: ["a:emoji:products"] },
   { id: "emoji_categories", label: "Category emoji", actions: ["a:emoji:categories"] },
