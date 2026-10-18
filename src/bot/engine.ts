@@ -534,7 +534,8 @@ function menuKb(ctx: Ctx) {
   const rows: any[][] = [[{ text: t(L.buy) }], [{ text: t(L.acc) }, { text: t(L.out) }]];
   if (ctx.bot.isMain) rows.push([{ text: t(MY_BOT_LABEL) }]);
   if (ctx.isBoss) rows.push([{ text: t(L.man) }, { text: t(L.stock) }], [{ text: t(L.stats) }]);
-  rows.push([{ text: t(L.lang) }]);
+  // Admins type commands from the panels; the Language keyboard button stays customer-only.
+  if (!ctx.isBoss) rows.push([{ text: t(L.lang) }]);
   return { reply_markup: { resize_keyboard: true, keyboard: rows } };
 }
 
