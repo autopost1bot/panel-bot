@@ -14,9 +14,10 @@ import {
 import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, resolveEmojiTheme, themeExtra, themeHtml, titlePrefix, type EmojiTheme } from "./emoji";
 import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "./colors";
 import { availableNetworks, checkPayment, createPayment, getWallet, openPayment, PAYMENT_TTL_MS, isTronAddress, NETWORK_CHAIN, NETWORK_LABEL, type CryptoPayment, type Network } from "./crypto";
+import { isLang, LANGS, translateExtra, translateHtml, translateLabel } from "./lang";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
-const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Reseller", stock: "📦 Stock", stats: "📊 Statistics" };
+const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Reseller", stock: "📦 Stock", stats: "📊 Statistics", lang: "🌐 Language" };
 
 // ─── Welcome message ─────────────────────────────────────────────────────────
 // Professional default shown on /start and in the shop menu. {name} is replaced
@@ -71,7 +72,7 @@ type Step =
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
 
-type Session = { qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined; identity?: { accountId: number; name: string; username: string } };
+type Session = { qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined; lang?: string | undefined; identity?: { accountId: number; name: string; username: string } };
 
 export type BotInfo = {
   token: string;
@@ -96,6 +97,7 @@ type Ctx = {
   hide: boolean;                 // customer view: show "$" instead of prices
   requestId: string;
   prices: Map<number, number>;   // customer view: account-specific prices
+  lang: string;                  // session language code (en default)
 };
 
 const lastNum = (t: string) => {
@@ -198,7 +200,7 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   const isBoss = bot.isMain ? bot.adminTgIds.includes(tgId) : tgId === bot.ownerTgId;
   const emojiOwn = parseEmojiTheme(emojiRaw);
   const emojiDefaults = parseEmojiTheme(defaultEmojiRaw);
-  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", tgUsername: String(from.username ?? ""), session, isBoss, requestId: String(update.update_id ?? cq?.id ?? msg?.message_id ?? crypto.randomUUID()), emoji: resolveEmojiTheme(emojiOwn, emojiDefaults), emojiOwn, emojiDefaults, hide: false, prices: new Map() };
+  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", tgUsername: String(from.username ?? ""), session, isBoss, requestId: String(update.update_id ?? cq?.id ?? msg?.message_id ?? crypto.randomUUID()), emoji: resolveEmojiTheme(emojiOwn, emojiDefaults), emojiOwn, emojiDefaults, hide: false, prices: new Map(), lang: isLang(session.lang) ? session.lang : "en" };
   (ctx as any).__msgId = msg?.message_id ?? null;
   // Customers see prices hidden (only "$") when the shop owner enabled it,
   // and their own account-specific prices when set.
@@ -219,8 +221,8 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   const cqMsgId: number | null = cq?.message?.message_id ?? null;
   let navigated = false;
   const reply = async (html: string, extra: Record<string, unknown> = {}) => {
-    html = themeHtml(html, ctx.emoji);
-    extra = themeExtra(extra, ctx.emoji);
+    html = translateHtml(themeHtml(html, ctx.emoji), ctx.lang);
+    extra = translateExtra(themeExtra(extra, ctx.emoji), ctx.lang);
     if (cqMsgId && !navigated) {
       navigated = true;
       const r = await editHtml(bot.token, chatId, cqMsgId, html, extra);
@@ -521,6 +523,7 @@ function menuKb(ctx: Ctx) {
   const rows: any[][] = [[{ text: L.buy }], [{ text: L.acc }, { text: L.out }]];
   if (ctx.bot.isMain) rows.push([{ text: MY_BOT_LABEL }]);
   if (ctx.isBoss) rows.push([{ text: L.man }, { text: L.stock }], [{ text: L.stats }]);
+  rows.push([{ text: L.lang }]);
   return { reply_markup: { resize_keyboard: true, keyboard: rows } };
 }
 
@@ -608,12 +611,23 @@ async function welcomeRows(ctx: Ctx): Promise<any[][]> {
     if ((await getSetting(ctx.bot, "aff_enabled")) !== "0") rows.push([btn("💰 Affiliates", "aff:menu")]);
     const sup = await supportUsername(ctx.bot);
     if (sup) rows.push([urlBtn("💬 Support", `https://t.me/${sup}`)]);
+    rows.push([btn(L.lang, "lang")]);
     return rows;
   }
   const rows: any[][] = [[btn("🔑 Buy keys", "c:shop")], [btn("👤 Account", "c:me"), btn("🧾 My orders", "c:orders")]];
   const sup = await supportUsername(ctx.bot);
   if (sup) rows.push([urlBtn("💬 Support", `https://t.me/${sup}`)]);
+  rows.push([btn(L.lang, "lang")]);
   return rows;
+}
+
+/** Language picker — available to every user in both bots. The choice is
+ *  saved in the session and applies to all following replies. */
+async function languageMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
+  ctx.session.step = null;
+  const rows: any[][] = LANGS.map(l => [btn(`${ctx.lang === l.code ? "✓ " : ""}${l.label}`, `lang:set:${l.code}`)]);
+  rows.push([btn("⬅️ Menu", ctx.isBoss || ctx.session.accountId ? "c:home" : "x:cancel")]);
+  await reply("🌐 <b>Language</b>\n\nChoose your language:", kb(...rows));
 }
 
 async function shopMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
@@ -743,36 +757,38 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
   // Bottom keyboard labels
   const label = plainLabel(raw);
   const menuLabel = (value: string) => plainLabel(value).replace(/^[\p{Extended_Pictographic}\uFE0F\s]+/u, "");
+  const tL = (value: string) => translateLabel(value, ctx.lang);
   const matchesMenu = (value: string) => menuLabel(label) === menuLabel(value);
-  if (matchesMenu(L.buy)) { ctx.session.step = null; return ctx.isBoss ? ownerShop(ctx, reply) : shopCustomer(ctx, reply); }
-  if (matchesMenu(L.acc)) {
+  if (matchesMenu(tL(L.buy))) { ctx.session.step = null; return ctx.isBoss ? ownerShop(ctx, reply) : shopCustomer(ctx, reply); }
+  if (matchesMenu(tL(L.acc))) {
     ctx.session.step = null;
     const acc = await getAccount(ctx);
     await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb(...(ctx.bot.isMain ? [[btn("💳 Add balance with Crypto", "pay:top")]] : []), [btn("📜 Purchase History", "c:orders")], [btn("⬅️ Go back", "c:home")]));
     return;
   }
-  if (matchesMenu(L.out)) {
+  if (matchesMenu(tL(L.out))) {
     ctx.session.step = null; ctx.session.accountId = undefined; ctx.session.username = undefined;
     await reply("👋 Logged out. Send /start to open the menu again.", { reply_markup: { remove_keyboard: true } });
     return;
   }
-  if (matchesMenu(L.man) && ctx.isBoss) { ctx.session.step = null; return manageList(ctx, reply); }
-  if (matchesMenu(L.stock) && ctx.isBoss) { ctx.session.step = null; return stockView(ctx, reply); }
-  if (matchesMenu(L.stats) && ctx.isBoss) { ctx.session.step = null; return adminMenu(ctx, reply); }
-  if (matchesMenu(MY_BOT_LABEL) && bot.isMain) { ctx.session.step = null; return showMyBot(ctx, reply); }
+  if (matchesMenu(tL(L.man)) && ctx.isBoss) { ctx.session.step = null; return manageList(ctx, reply); }
+  if (matchesMenu(tL(L.stock)) && ctx.isBoss) { ctx.session.step = null; return stockView(ctx, reply); }
+  if (matchesMenu(tL(L.stats)) && ctx.isBoss) { ctx.session.step = null; return adminMenu(ctx, reply); }
+  if (matchesMenu(tL(MY_BOT_LABEL)) && bot.isMain) { ctx.session.step = null; return showMyBot(ctx, reply); }
+  if (matchesMenu(tL(L.lang))) { ctx.session.step = null; return languageMenu(ctx, reply); }
 
   // Legacy keyboard labels from older bot versions (persistent keyboards survive updates)
   const low = label.toLowerCase();
   if (low.includes("admin panel") && ctx.isBoss) { ctx.session.step = null; return adminMenu(ctx, reply); }
   // Persistent keyboards on older phones still carry the "Manage" label, so it keeps opening the same panel.
   if (low === "manage" && ctx.isBoss) { ctx.session.step = null; return manageList(ctx, reply); }
-  if (low.includes("buy keys")) { ctx.session.step = null; return ctx.isBoss ? ownerShop(ctx, reply) : shopCustomer(ctx, reply); }
-  if (low.includes("log out")) {
+  if (low.includes("buy keys") || low === menuLabel(tL(L.buy)).toLowerCase()) { ctx.session.step = null; return ctx.isBoss ? ownerShop(ctx, reply) : shopCustomer(ctx, reply); }
+  if (low.includes("log out") || low === menuLabel(tL(L.out)).toLowerCase()) {
     ctx.session.step = null; ctx.session.accountId = undefined; ctx.session.username = undefined;
     await reply("👋 Logged out. Send /start to open the menu again.", { reply_markup: { remove_keyboard: true } });
     return;
   }
-  if (low.includes("my orders") || low === "account") {
+  if (low.includes("my orders") || low === "account" || low === menuLabel(tL(L.acc)).toLowerCase()) {
     ctx.session.step = null;
     const acc = await getAccount(ctx);
     await reply(`👤 <b>Your account:</b>\n- Username: <code>${escapeHtml(acc?.username ?? ctx.session.username ?? "")}</code>\n- Balance: <code>${money(acc?.balance ?? 0)}</code>`, kb(...(ctx.bot.isMain ? [[btn("💳 Add balance with Crypto", "pay:top")]] : []), [btn("📜 Purchase History", "c:orders")], [btn("⬅️ Go back", "c:home")]));
@@ -1036,7 +1052,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (balanceError && bot.durable) throw balanceError;
       ctx.session.step = null;
       if (!c) { await reply("❌ Update failed.", kb([btn("⬅️ Menu", "a:home")])); return; }
-      if (c.tg_id) await sendHtml(bot.token, Number(c.tg_id), `💰 Your balance was ${a > 0 ? "credited" : "debited"} <b>${money(Math.abs(a))}</b>. New balance: <b>${money(c.balance)}</b>`).catch(() => {});
+      if (c.tg_id) await sendHtml(bot.token, Number(c.tg_id), translateHtml(`💰 Your balance was ${a > 0 ? "credited" : "debited"} <b>${money(Math.abs(a))}</b>. New balance: <b>${money(c.balance)}</b>`, ctx.lang)).catch(() => {});
       await reply(`✅ New balance for <code>${escapeHtml(uname)}</code>: ${money(c.balance)}`, kb([btn("⬅️ Menu", "a:home")]));
       return;
     }
@@ -1065,7 +1081,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (balanceError && bot.durable) throw balanceError;
       ctx.session.step = null;
       if (!c) { await reply("❌ Update failed.", kb([btn("⬅️ Menu", "a:home")])); return; }
-      if (c.tg_id) await sendHtml(bot.token, Number(c.tg_id), `💰 Your balance was ${amount > 0 ? "credited" : "debited"} <b>${money(Math.abs(amount))}</b>. New balance: <b>${money(c.balance)}</b>`).catch(() => {});
+      if (c.tg_id) await sendHtml(bot.token, Number(c.tg_id), translateHtml(`💰 Your balance was ${amount > 0 ? "credited" : "debited"} <b>${money(Math.abs(amount))}</b>. New balance: <b>${money(c.balance)}</b>`, ctx.lang)).catch(() => {});
       await reply(`✅ New balance for <b>${escapeHtml(c.username)}</b>: <b>${money(c.balance)}</b>`, kb([btn("⬅️ Account", `a:m:${step.cid}`)]));
       return;
     }
@@ -1194,6 +1210,16 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (ap) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ap[1])); }
   if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : ctx.session.accountId ? shopMenu(ctx, reply) : handleText(ctx, reply, "/start", [], save); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
+
+  // ── Language picker (both bots, every user)
+  if (data === "lang") return languageMenu(ctx, reply);
+  const langSet = data.match(/^lang:set:(en|ar|ru|tr|hi)$/);
+  if (langSet) {
+    ctx.session.lang = langSet[1];
+    await save();
+    await reply("✅ Language saved.");
+    return ctx.isBoss ? adminMenu(ctx, reply) : ctx.session.accountId ? startWelcome(ctx, reply) : undefined;
+  }
 
   if ((m = data.match(/^a:stockadd(?::(\d+))?$/)) && own) {
     ctx.session.step = null;
@@ -2026,9 +2052,9 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
   for (let index = 0; index < receipts.length; index++) {
     const message = receipts[index];
     if (message === undefined) continue;
-    await deliver(ctx.bot, ctx.chatId, themeHtml(message, ctx.emoji), {}, `receipt:${ctx.bot.tenantId}:${ctx.requestId}:${index}`);
+    await deliver(ctx.bot, ctx.chatId, translateHtml(themeHtml(message, ctx.emoji), ctx.lang), {}, `receipt:${ctx.bot.tenantId}:${ctx.requestId}:${index}`);
   }
-  await deliver(ctx.bot, ctx.chatId, themeHtml("🧾 <b>Order history</b> · 🏠 <b>Menu</b>", ctx.emoji), themeExtra(navigation, ctx.emoji), `receipt-navigation:${ctx.bot.tenantId}:${ctx.requestId}`);
+  await deliver(ctx.bot, ctx.chatId, translateHtml(themeHtml("🧾 <b>Order history</b> · 🏠 <b>Menu</b>", ctx.emoji), ctx.lang), themeExtra(translateExtra(navigation, ctx.lang), ctx.emoji), `receipt-navigation:${ctx.bot.tenantId}:${ctx.requestId}`);
   const owner = ctx.bot.isMain ? ctx.bot.adminTgIds[0] : ctx.bot.ownerTgId;
   if (owner && owner !== ctx.tgId) await sendHtml(ctx.bot.token, owner, `🛒 New order: ${escapeHtml(res.label)} × ${qty} — ${money(res.total)} by ${escapeHtml(acc.username)}`).catch(() => {});
 }
@@ -2414,6 +2440,7 @@ const QC_GRID: [string, string][][] = [
   [["welcome", "👋 Welcome text"], ["hide", "🙈 Hide prices"]],
   [["support", "💬 Support username"], ["users", "👥 Logged-in users"]],
   [["emoji", "✨ Premium emoji"], ["colors", "🎨 Button colors"]],
+  [["language", "🌐 Language"]],
   [["tenants", "🤖 Reseller bots"], ["affiliates", "💰 Affiliates"]],
   [["buy", "🔑 Buy keys"], ["custom_prices", "💲 Custom prices"]],
   [["remove_user", "🚫 Remove user"]],
@@ -2444,7 +2471,7 @@ async function quickColors(ctx: Ctx, reply: (h: string, e?: any) => any, data: s
     await saveEmojiTheme(ctx);
     ctx.session.qc = undefined;
     // Telegram cannot replace a persistent keyboard through editMessageText.
-    await sendHtml(ctx.bot.token, ctx.chatId, themeHtml("✅ All button colors saved.", ctx.emoji), themeExtra(menuKb(ctx), ctx.emoji));
+    await sendHtml(ctx.bot.token, ctx.chatId, translateHtml(themeHtml("✅ All button colors saved.", ctx.emoji), ctx.lang), themeExtra(translateExtra(menuKb(ctx), ctx.lang), ctx.emoji));
     return adminMenu(ctx, reply);
   }
   const fallback = saved.inline;
