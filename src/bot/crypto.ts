@@ -70,6 +70,10 @@ export type CryptoPayment = {
  *  possible; retries with the next suffix if the amount is taken. */
 export async function createPayment(accountId: number, tgId: number, kind: "topup" | "sub", baseAmount: number, network: Network = "bep20"): Promise<CryptoPayment | null> {
   const db = await getDb();
+  // Enforce the block at the writer too, failing closed if the guard cannot be read.
+  const { data: guard, error: guardError } = await db.from("bot_order_guards").select("blocked_until").eq("account_id", accountId).maybeSingle();
+  if (guardError) throw guardError;
+  if (guard?.blocked_until && new Date(guard.blocked_until).getTime() > Date.now()) return null;
   const { data: pending, error: readError } = await db.from("crypto_payments").select("amount").eq("status", "pending").eq("network", network);
   if (readError) throw readError;
   const taken = new Set((pending ?? []).map((p: any) => Math.round(Number(p.amount) * 100)));
