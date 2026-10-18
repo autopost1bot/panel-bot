@@ -49,15 +49,15 @@ const PRESETS: [string, string][] = [
 export const PRICE_ASK = "💵 Enter the price for this key type (USD $):";
 
 // Prompts of the product flow: shown as one line with a Cancel button below.
-const PRODUCT_PROMPTS: string[] = ["add_name", "add_vars", "var_price", "set_price", "set_cost", "set_name", "set_desc"];
+const PRODUCT_PROMPTS: string[] = ["add_name", "add_vars", "var_price", "var_cost", "set_price", "set_cost", "set_name", "set_desc"];
 
 
 
 type Step =
   | { s: "login_user" } | { s: "login_pass"; username: string }
   | { s: "add_name"; cat: number | null }
-  | { s: "add_vars"; pid: number } | { s: "var_price"; pid: number; label: string }
-  | { s: "var_confirm"; pid: number; label: string; price: number }
+  | { s: "add_vars"; pid: number } | { s: "var_price"; pid: number; label: string } | { s: "var_cost"; pid: number; label: string; price: number }
+  | { s: "var_confirm"; pid: number; label: string; price: number; cost: number }
   | { s: "set_price"; pid: number } | { s: "set_cost"; pid: number } | { s: "set_name"; pid: number }
   | { s: "set_desc"; pid: number } | { s: "add_keys"; pid: number }
   | { s: "stock_keys"; pid: number } | { s: "stock_review"; pid: number; keys: string[]; request: string }
@@ -917,16 +917,24 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         await db.from("products").insert({ tenant_id: bot.tenantId, name: v.label, price: v.price, cost: v.cost, parent_id: step.pid, category_id: parent?.category_id ?? null });
         n++;
       }
-      await reply(`✅ Added ${n} variant(s).` + (bad.length ? `\n❌ Could not read: ${bad.map(escapeHtml).join(", ")}\nFormat: <code>7 Days - 10</code>` : ""));
+      await reply(`✅ Added ${n} variant(s).` + (bad.length ? `\n❌ Could not read: ${bad.map(escapeHtml).join(", ")}\nFormat: <code>7 Days - 10 - 3</code> (duration - price - cost)` : ""));
       return variantPrompt(ctx, reply, step.pid);
     }
     case "var_price": {
       if (!ctx.isBoss) return;
-      const v = Number.isFinite(num) && num >= 0 ? { price: num, cost: 0 } : null;
-      if (!v) return needNum();
+      if (!(Number.isFinite(num) && num >= 0)) return needNum();
+      return ask(ctx, reply, { s: "var_cost", pid: step.pid, label: step.label, price: num }, "🏷 Now send the cost — what you pay per key (e.g. 3). Send - to skip (0):");
+    }
+    case "var_cost": {
+      if (!ctx.isBoss) return;
+      let cost = 0;
+      if (raw.trim() !== "-") {
+        if (!(Number.isFinite(num) && num >= 0)) return needNum();
+        cost = num;
+      }
       const { data: prod } = await db.from("products").select("name").eq("id", step.pid).eq("tenant_id", bot.tenantId).maybeSingle();
-      ctx.session.step = { s: "var_confirm", pid: step.pid, label: step.label, price: v.price };
-      await reply(`📋 <b>Review before saving</b>\n\n📦 Product: <b>${prod?.name ?? ""}</b>\n⏱ Duration: <b>${step.label}</b>\n💵 Price: <b>${money(v.price)}</b>`,
+      ctx.session.step = { s: "var_confirm", pid: step.pid, label: step.label, price: step.price, cost };
+      await reply(`📋 <b>Review before saving</b>\n\n📦 Product: <b>${prod?.name ?? ""}</b>\n⏱ Duration: <b>${step.label}</b>\n💵 Price: <b>${money(step.price)}</b>\n🏷 Cost: <b>${money(cost)}</b>`,
         kb([btn("✅ Save", "a:vsave"), btn("✖️ Cancel", "a:vcancel")]));
       return;
     }
@@ -1351,10 +1359,10 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     ctx.session.step = null;
     if (data === "a:vsave") {
       const { data: parent } = await db.from("products").select("category_id").eq("id", st.pid).eq("tenant_id", bot.tenantId).single();
-      await db.from("products").insert({ tenant_id: bot.tenantId, name: st.label, price: st.price, cost: 0, parent_id: st.pid, category_id: parent?.category_id ?? null });
+      await db.from("products").insert({ tenant_id: bot.tenantId, name: st.label, price: st.price, cost: st.cost, parent_id: st.pid, category_id: parent?.category_id ?? null });
     }
     await reply(data === "a:vsave"
-      ? `✅ <b>Saved!</b>\n⏱ ${st.label} — <b>${money(st.price)}</b>\n\nWould you like to add another duration to this product?`
+      ? `✅ <b>Saved!</b>\n⏱ ${st.label} — <b>${money(st.price)}</b> · 🏷 <b>${money(st.cost)}</b>\n\nWould you like to add another duration to this product?`
       : "✖️ Not saved.\n\nWould you like to add a duration to this product?",
       kb([btn("➕ Add another duration", `a:v:${st.pid}`)], [btn("✅ Finish", `a:p:${st.pid}`)]));
     return;
@@ -1414,7 +1422,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if ((m = data.match(/^a:p:(\d+)$/)) && own) return adminProduct(ctx, reply, Number(m[1]));
   if ((m = data.match(/^a:k:(\d+)$/)) && own) return ask(ctx, reply, { s: "add_keys", pid: Number(m[1]) }, "📝 Send keys, one per line:\n\n<code>DEMO-KEY1</code>\n\n<code>DEMO-KEY2</code>", kb([btn("✖️ Cancel", `x:ak:${m[1]}`)]));
   if ((m = data.match(/^a:sp:(\d+)$/)) && own) return ask(ctx, reply, { s: "set_price", pid: Number(m[1]) }, "📝 Type new price:");
-  if ((m = data.match(/^a:sc:(\d+)$/)) && own) return ask(ctx, reply, { s: "set_cost", pid: Number(m[1]) }, "🏷 Send the new cost (e.g. 3):");
+  if ((m = data.match(/^a:sc:(\d+)$/)) && own) return ask(ctx, reply, { s: "set_cost", pid: Number(m[1]) }, "🏷 Send the new cost — what you pay per key (e.g. 3):");
   if ((m = data.match(/^a:sn:(\d+)$/)) && own) return ask(ctx, reply, { s: "set_name", pid: Number(m[1]) }, "✏️ Send the new name (premium emoji allowed):");
   if ((m = data.match(/^a:sd:(\d+)$/)) && own) return ask(ctx, reply, { s: "set_desc", pid: Number(m[1]) }, "📝 Send the description (premium emoji allowed), or - to remove:");
   if ((m = data.match(/^a:del:(\d+)$/)) && own) {
@@ -1723,8 +1731,8 @@ async function adminProduct(ctx: Ctx, reply: (h: string, e?: any) => any, pid: n
   if (!p) return;
   if (p.parent_id) {
     const parent = await getProduct(db, ctx.bot.tenantId, Number(p.parent_id));
-    await reply(`${parent?.name ?? ""} — <b>${p.name}</b>\n\n💵 Price: <b>${money(p.price)}</b>\n📦 Stock: ${p.stock}`, kb(
-      [btn("🔑 Add keys", `a:k:${pid}`), btn("💵 Price", `a:sp:${pid}`)],
+    await reply(`${parent?.name ?? ""} — <b>${p.name}</b>\n\n💵 Price: <b>${money(p.price)}</b>\n🏷 Cost: <b>${money(p.cost)}</b>\n📦 Stock: ${p.stock}`, kb(
+      [btn("🔑 Add keys", `a:k:${pid}`), btn("💵 Price", `a:sp:${pid}`), btn("🏷 Cost", `a:sc:${pid}`)],
       [btn("🗂 View keys", `a:vk:${pid}`)],
       [btn("✏️ Name", `a:sn:${pid}`), btn("🗑 Delete", `a:del:${pid}`)], [btn("⬅️ Go back", `c:p:${p.parent_id}`)]));
     return;
@@ -1740,9 +1748,9 @@ async function adminProduct(ctx: Ctx, reply: (h: string, e?: any) => any, pid: n
       [btn("✏️ Name", `a:sn:${pid}`), btn("📝 Description", `a:sd:${pid}`)],
       [btn("🗑 Delete product", `a:del:${pid}`), btn("⬅️ Products", "a:list")]));
   } else {
-    await reply(head + `\n💵 Price: <b>${money(p.price)}</b>\n📦 Stock: ${p.stock}\n\nNo variants yet — add 1 Day / 7 Days / 30 Days… with ➕ Add variants.`, kb(
+    await reply(head + `\n💵 Price: <b>${money(p.price)}</b>\n🏷 Cost: <b>${money(p.cost)}</b>\n📦 Stock: ${p.stock}\n\nNo variants yet — add 1 Day / 7 Days / 30 Days… with ➕ Add variants.`, kb(
       [btn("➕ Add variants", `a:v:${pid}`)],
-      [btn("🔑 Add keys", `a:k:${pid}`), btn("💵 Price", `a:sp:${pid}`)],
+      [btn("🔑 Add keys", `a:k:${pid}`), btn("💵 Price", `a:sp:${pid}`), btn("🏷 Cost", `a:sc:${pid}`)],
       [btn("🗂 View keys", `a:vk:${pid}`)],
       [btn("✏️ Name", `a:sn:${pid}`), btn("📝 Description", `a:sd:${pid}`), btn("📂 Category", `a:pc:${pid}`)],
       [btn("🗑 Delete product", `a:del:${pid}`), btn("⬅️ Products", "a:list")]));
