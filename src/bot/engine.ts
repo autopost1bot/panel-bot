@@ -1746,13 +1746,17 @@ async function keysReport(db: any, tid: number, p: any, requested = 0) {
     if (sold.length) {
       lines.push(`\n✅ <b>Sold</b> · ${sold.length} on this page`);
       for (const k of sold) {
+        const ownerName = parent?.name ?? p.name;
+        const entryLabel = plainLabel(ownerName) === plainLabel(v.name)
+          ? escapeHtml(plainLabel(v.name))
+          : `${escapeHtml(plainLabel(ownerName))} — ${escapeHtml(plainLabel(v.name))}`;
         const order = await db.from("shop_orders").select("account_id,created_at,price").eq("tenant_id", tid).eq("product_id", k.product_id).eq("key", k.key).order("id", { ascending: false }).limit(1).maybeSingle();
         if (order.error) throw order.error;
         let detail = "\nSale details unavailable";
         if (order.data) {
           const account = await db.from("bot_accounts").select("username").eq("tenant_id", tid).eq("id", order.data.account_id).maybeSingle();
           if (account.error) throw account.error;
-          detail = `\nBuyer: <b>${escapeHtml(account.data?.username ?? "Unavailable")}</b> · Paid: <b>${money(order.data.price)}</b>\nDate: ${fmtDate(order.data.created_at)}`;
+          detail = `\nBuyer: <b>${escapeHtml(account.data?.username ?? "Unavailable")}</b> · ${entryLabel} · Paid: <b>${money(order.data.price)}</b>\nDate: ${fmtDate(order.data.created_at)}`;
         }
         lines.push(`<code>${escapeHtml(k.key)}</code>${detail}\n`);
       }
