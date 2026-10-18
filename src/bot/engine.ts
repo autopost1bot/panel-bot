@@ -520,10 +520,12 @@ async function fullName(db: any, tenantId: number, p: any): Promise<string> {
 // ─── Menus ───────────────────────────────────────────────────────────────────
 
 function menuKb(ctx: Ctx) {
-  const rows: any[][] = [[{ text: L.buy }], [{ text: L.acc }, { text: L.out }]];
-  if (ctx.bot.isMain) rows.push([{ text: MY_BOT_LABEL }]);
-  if (ctx.isBoss) rows.push([{ text: L.man }, { text: L.stock }], [{ text: L.stats }]);
-  rows.push([{ text: L.lang }]);
+  // The persistent bottom keyboard follows the chosen language too.
+  const t = (value: string) => translateLabel(value, ctx.lang);
+  const rows: any[][] = [[{ text: t(L.buy) }], [{ text: t(L.acc) }, { text: t(L.out) }]];
+  if (ctx.bot.isMain) rows.push([{ text: t(MY_BOT_LABEL) }]);
+  if (ctx.isBoss) rows.push([{ text: t(L.man) }, { text: t(L.stock) }], [{ text: t(L.stats) }]);
+  rows.push([{ text: t(L.lang) }]);
   return { reply_markup: { resize_keyboard: true, keyboard: rows } };
 }
 
@@ -1216,8 +1218,12 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   const langSet = data.match(/^lang:set:(en|ar|ru|tr|hi)$/);
   if (langSet) {
     ctx.session.lang = langSet[1];
+    ctx.lang = langSet[1];
+    ctx.session.kbShown = true;
     await save();
     await reply("✅ Language saved.");
+    // Telegram keeps the old persistent keyboard until a fresh message replaces it.
+    await sendHtml(bot.token, ctx.chatId, translateHtml(themeHtml("⌨️ Menu", ctx.emoji), ctx.lang), translateExtra(themeExtra(menuKb(ctx), ctx.emoji), ctx.lang));
     return ctx.isBoss ? adminMenu(ctx, reply) : ctx.session.accountId ? startWelcome(ctx, reply) : undefined;
   }
 
