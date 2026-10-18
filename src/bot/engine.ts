@@ -72,7 +72,7 @@ type Step =
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
 
-type Session = { qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined; lang?: string | undefined; identity?: { accountId: number; name: string; username: string } };
+type Session = { qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined; kbLang?: string | undefined; lang?: string | undefined; identity?: { accountId: number; name: string; username: string } };
 
 export type BotInfo = {
   token: string;
@@ -223,6 +223,7 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   const reply = async (html: string, extra: Record<string, unknown> = {}) => {
     html = translateHtml(themeHtml(html, ctx.emoji), ctx.lang);
     extra = translateExtra(themeExtra(extra, ctx.emoji), ctx.lang);
+    if ((extra as any)?.reply_markup?.keyboard) ctx.session.kbLang = ctx.lang;
     if (cqMsgId && !navigated) {
       navigated = true;
       const r = await editHtml(bot.token, chatId, cqMsgId, html, extra);
@@ -520,8 +521,9 @@ async function fullName(db: any, tenantId: number, p: any): Promise<string> {
 // ─── Menus ───────────────────────────────────────────────────────────────────
 
 function menuKb(ctx: Ctx) {
-  // The persistent bottom keyboard follows the chosen language too.
-  const t = (value: string) => translateLabel(value, ctx.lang);
+  // English source labels: colors/icons are resolved first, then the reply
+  // boundary translates, so translated keyboards keep their styling.
+  const t = (value: string) => value;
   const rows: any[][] = [[{ text: t(L.buy) }], [{ text: t(L.acc) }, { text: t(L.out) }]];
   if (ctx.bot.isMain) rows.push([{ text: t(MY_BOT_LABEL) }]);
   if (ctx.isBoss) rows.push([{ text: t(L.man) }, { text: t(L.stock) }], [{ text: t(L.stats) }]);
@@ -641,11 +643,18 @@ async function shopMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
 
 /** /start for a logged-in customer: welcome + inline buttons, and the
  *  persistent bottom keyboard once per session. */
+/** Send a fresh persistent keyboard: themed (icons/colors) then translated. */
+async function sendMenuKb(ctx: Ctx, text: string) {
+  ctx.session.kbShown = true;
+  ctx.session.kbLang = ctx.lang;
+  await sendHtml(ctx.bot.token, ctx.chatId, translateHtml(themeHtml(text, ctx.emoji), ctx.lang), translateExtra(themeExtra(menuKb(ctx), ctx.emoji), ctx.lang));
+}
+
 async function startWelcome(ctx: Ctx, reply: (h: string, e?: any) => any) {
   if (ctx.bot.isMain && await showOrderBlock(ctx, reply)) return;
-  if (!ctx.session.kbShown) {
-    ctx.session.kbShown = true;
-    await reply("⌨️ Menu", menuKb(ctx));
+  // Re-send when missing or still in another language (older keyboards survive updates).
+  if (!ctx.session.kbShown || (ctx.session.kbLang ?? "en") !== ctx.lang) {
+    await sendMenuKb(ctx, "⌨️ Menu");
   }
   return shopMenu(ctx, reply);
 }
@@ -1220,10 +1229,11 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     ctx.session.lang = langSet[1];
     ctx.lang = langSet[1];
     ctx.session.kbShown = true;
+    ctx.session.kbLang = ctx.lang;
     await save();
     await reply("✅ Language saved.");
     // Telegram keeps the old persistent keyboard until a fresh message replaces it.
-    await sendHtml(bot.token, ctx.chatId, translateHtml(themeHtml("⌨️ Menu", ctx.emoji), ctx.lang), translateExtra(themeExtra(menuKb(ctx), ctx.emoji), ctx.lang));
+    await sendMenuKb(ctx, "⌨️ Menu");
     return ctx.isBoss ? adminMenu(ctx, reply) : ctx.session.accountId ? startWelcome(ctx, reply) : undefined;
   }
 
@@ -1325,7 +1335,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
       colors.items = { ...colors.items, [setMatch[1]]: setMatch[2] };
       ctx.emojiOwn.buttons = colors;
       await saveEmojiTheme(ctx);
-      await sendHtml(bot.token, ctx.chatId, "✅ Button color updated.", themeExtra(menuKb(ctx), ctx.emoji));
+      await sendMenuKb(ctx, "✅ Button color updated.");
       return colorsMenu(ctx, reply, Number(setMatch[3]));
     }
     const match = data.match(/^a:colors:(inline|keyboard):(default|primary|success|danger)$/);
@@ -1337,7 +1347,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     await saveEmojiTheme(ctx);
     // A reply keyboard is replaced with a fresh message, not editMessageText.
     if (group === "keyboard") {
-      await sendHtml(bot.token, ctx.chatId, "✅ Bottom keyboard color updated.", themeExtra(menuKb(ctx), ctx.emoji));
+      await sendMenuKb(ctx, "✅ Bottom keyboard color updated.");
     }
     return colorsMenu(ctx, reply);
   }
@@ -2477,7 +2487,7 @@ async function quickColors(ctx: Ctx, reply: (h: string, e?: any) => any, data: s
     await saveEmojiTheme(ctx);
     ctx.session.qc = undefined;
     // Telegram cannot replace a persistent keyboard through editMessageText.
-    await sendHtml(ctx.bot.token, ctx.chatId, translateHtml(themeHtml("✅ All button colors saved.", ctx.emoji), ctx.lang), themeExtra(translateExtra(menuKb(ctx), ctx.lang), ctx.emoji));
+    await sendMenuKb(ctx, "✅ All button colors saved.");
     return adminMenu(ctx, reply);
   }
   const fallback = saved.inline;
