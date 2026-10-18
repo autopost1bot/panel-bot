@@ -1,7 +1,7 @@
 import { escapeHtml, extractEmojiId, iconButton, plainLabel } from "./tg";
 import { colorExtra, parseButtonColors, type ButtonColors } from "./colors";
 
-export const EMOJI_ICONS = ["🛍", "🏛", "🚀", "🔧", "📦", "📊", "➕", "📂", "👤", "💰", "📣", "👋", "🙈", "👁", "🤖", "🔑", "🧾", "📜", "⬅️", "✖️", "✅", "📝", "⏱", "💵", "🛒", "🔢", "🏠", "✏️", "🗑", "📋", "🔐", "❌", "⚠️", "⭐", "📅", "🟢", "🔍", "🔓", "➖", "📄", "💲", "🎉", "🛠", "⛔️", "✉️", "👥", "🏷", "🔎", "📈", "📉", "💳", "💸", "🔄", "🔙", "📌", "👉", "➡️", "💬", "🎁", "🔗", "📤", "🚫", "⏳", "ℹ️", "⌛", "🌐"];
+export const EMOJI_ICONS = ["🛍", "🏛", "🚀", "🔧", "📦", "📊", "➕", "📂", "👤", "💰", "📣", "👋", "🙈", "👁", "🤖", "🔑", "🧾", "📜", "⬅️", "✖️", "✅", "📝", "⏱", "💵", "🛒", "🔢", "🏠", "✏️", "🗑", "📋", "🔐", "❌", "⚠️", "⭐", "📅", "🟢", "🔍", "🔓", "➖", "📄", "💲", "🎉", "🛠", "⛔️", "✉️", "👥", "🏷", "🔎", "📈", "📉", "💳", "💸", "🔄", "🔙", "📌", "👉", "➡️", "💬", "🎁", "🔗", "📤", "🚫", "⏳", "ℹ️", "⌛", "🌐", "🇬🇧", "🇸🇦", "🇷🇺", "🇹🇷", "🇮🇳"];
 // Display names only: saved settings and callback indexes keep using EMOJI_ICONS.
 export const EMOJI_LABELS: Record<string, string> = {
   "🎁": "Affiliate commission", "🔗": "Affiliate link", "📤": "Share link", "🚫": "Remove user",
@@ -21,6 +21,7 @@ export const EMOJI_LABELS: Record<string, string> = {
   "💳": "Payments", "💬": "Support", "💸": "Top up / Deduct", "🔄": "Refresh / Renew",
   "🔙": "Back", "📌": "Notice", "👉": "Continue", "➡️": "Next",
   "⏳": "Order timer", "ℹ️": "Info note", "⌛": "Expired", "🌐": "Language",
+  "🇬🇧": "English language", "🇸🇦": "Arabic language", "🇷🇺": "Russian language", "🇹🇷": "Turkish language", "🇮🇳": "Hindi language",
 };
 export type EmojiTheme = { enabled: boolean; icons: Record<string, string>; buttons?: ButtonColors; removedIcons?: string[] };
 export function parseEmojiTheme(raw: string | null): EmojiTheme {
@@ -61,7 +62,7 @@ export function themeHtml(html: string, theme: EmojiTheme): string {
   if (!theme.enabled) return html.replace(/<tg-emoji\s+emoji-id="\d+">([\s\S]*?)<\/tg-emoji>/g, "$1");
   // Never touch keys, usernames or existing custom emoji entities.
   return html.split(/(<code\b[^>]*>[\s\S]*?<\/code>|<pre\b[^>]*>[\s\S]*?<\/pre>|<tg-emoji\b[^>]*>[\s\S]*?<\/tg-emoji>|<[^>]+>)/g)
-    .map(part => part.startsWith("<") ? part : part.replace(/(?:\p{Extended_Pictographic}|\p{Regional_Indicator})(?:\uFE0F)?/gu, icon => theme.icons[icon] ?? icon)).join("");
+    .map(part => part.startsWith("<") ? part : part.replace(/(?:\p{Regional_Indicator}{2}|\p{Extended_Pictographic}|\p{Regional_Indicator})(?:\uFE0F)?/gu, icon => theme.icons[icon] ?? icon)).join("");
 }
 export function themeExtra(extra: Record<string, any>, theme: EmojiTheme): Record<string, any> {
   extra = colorExtra(extra, theme.buttons);
