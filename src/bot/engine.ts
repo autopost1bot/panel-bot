@@ -200,7 +200,7 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   const isBoss = bot.isMain ? bot.adminTgIds.includes(tgId) : tgId === bot.ownerTgId;
   const emojiOwn = parseEmojiTheme(emojiRaw);
   const emojiDefaults = parseEmojiTheme(defaultEmojiRaw);
-  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", tgUsername: String(from.username ?? ""), session, isBoss, requestId: String(update.update_id ?? cq?.id ?? msg?.message_id ?? crypto.randomUUID()), emoji: resolveEmojiTheme(emojiOwn, emojiDefaults), emojiOwn, emojiDefaults, hide: false, prices: new Map(), lang: isLang(session.lang) ? session.lang : "en" };
+  const ctx: Ctx = { bot, chatId, tgId, firstName: [from.first_name, from.last_name].filter(Boolean).join(" ") || from.username || "", tgUsername: String(from.username ?? ""), session, isBoss, requestId: String(update.update_id ?? cq?.id ?? msg?.message_id ?? crypto.randomUUID()), emoji: resolveEmojiTheme(emojiOwn, emojiDefaults), emojiOwn, emojiDefaults, hide: false, prices: new Map(), lang: isLang(session.lang) ? session.lang : autoLang(from.language_code) };
   (ctx as any).__msgId = msg?.message_id ?? null;
   // Customers see prices hidden (only "$") when the shop owner enabled it,
   // and their own account-specific prices when set.
@@ -519,6 +519,13 @@ async function fullName(db: any, tenantId: number, p: any): Promise<string> {
 }
 
 // ─── Menus ───────────────────────────────────────────────────────────────────
+
+/** First visit: follow the Telegram app language when the bot supports it, else English.
+ *  A language picked with the Language button always wins (stored in the session). */
+export function autoLang(code: unknown): string {
+  const base = String(code ?? "").toLowerCase().split(/[-_]/)[0];
+  return base !== "en" && isLang(base) ? base : "en";
+}
 
 function menuKb(ctx: Ctx) {
   // English source labels: colors/icons are resolved first, then the reply
