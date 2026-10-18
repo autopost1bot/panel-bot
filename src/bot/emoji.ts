@@ -1,7 +1,7 @@
 import { escapeHtml, extractEmojiId, iconButton, plainLabel } from "./tg";
 import { colorExtra, parseButtonColors, type ButtonColors } from "./colors";
 
-export const EMOJI_ICONS = ["🛍", "🏛", "🚀", "🔧", "📦", "📊", "➕", "📂", "👤", "💰", "📣", "👋", "🙈", "👁", "🤖", "🔑", "🧾", "📜", "⬅️", "✖️", "✅", "📝", "⏱", "💵", "🛒", "🔢", "🏠", "✏️", "🗑", "📋", "🔐", "❌", "⚠️", "⭐", "📅", "🟢", "🔍", "🔓", "➖", "📄", "💲", "🎉", "🛠", "⛔️", "✉️", "👥", "🏷", "🔎", "📈", "📉", "💳", "💸", "🔄", "🔙", "📌", "👉", "➡️", "💬", "🎁", "🔗", "📤", "🚫", "⏳", "ℹ️", "⌛"];
+export const EMOJI_ICONS = ["🛍", "🏛", "🚀", "🔧", "📦", "📊", "➕", "📂", "👤", "💰", "📣", "👋", "🙈", "👁", "🤖", "🔑", "🧾", "📜", "⬅️", "✖️", "✅", "📝", "⏱", "💵", "🛒", "🔢", "🏠", "✏️", "🗑", "📋", "🔐", "❌", "⚠️", "⭐", "📅", "🟢", "🔍", "🔓", "➖", "📄", "💲", "🎉", "🛠", "⛔️", "✉️", "👥", "🏷", "🔎", "📈", "📉", "💳", "💸", "🔄", "🔙", "📌", "👉", "➡️", "💬", "🎁", "🔗", "📤", "🚫", "⏳", "ℹ️", "⌛", "🌐"];
 // Display names only: saved settings and callback indexes keep using EMOJI_ICONS.
 export const EMOJI_LABELS: Record<string, string> = {
   "🎁": "Affiliate commission", "🔗": "Affiliate link", "📤": "Share link", "🚫": "Remove user",
@@ -20,7 +20,7 @@ export const EMOJI_LABELS: Record<string, string> = {
   "🏷": "Product label", "🔎": "Look at purchases", "📈": "Profit", "📉": "Expenses",
   "💳": "Payments", "💬": "Support", "💸": "Top up / Deduct", "🔄": "Refresh / Renew",
   "🔙": "Back", "📌": "Notice", "👉": "Continue", "➡️": "Next",
-  "⏳": "Order timer", "ℹ️": "Info note", "⌛": "Expired",
+  "⏳": "Order timer", "ℹ️": "Info note", "⌛": "Expired", "🌐": "Language",
 };
 export type EmojiTheme = { enabled: boolean; icons: Record<string, string>; buttons?: ButtonColors; removedIcons?: string[] };
 export function parseEmojiTheme(raw: string | null): EmojiTheme {
