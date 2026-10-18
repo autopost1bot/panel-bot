@@ -359,3 +359,14 @@ END; $$;
 REVOKE EXECUTE ON FUNCTION public.claim_bot_delivery(bigint) FROM PUBLIC,anon,authenticated;
 GRANT EXECUTE ON FUNCTION public.claim_bot_delivery(bigint) TO service_role;
 NOTIFY pgrst, 'reload schema';
+
+-- Order spam guard: per-account daily cancel counter and temporary order block.
+CREATE TABLE IF NOT EXISTS public.bot_order_guards (
+ account_id integer PRIMARY KEY,
+ cancel_day date NOT NULL DEFAULT CURRENT_DATE,
+ cancel_count integer NOT NULL DEFAULT 0,
+ blocked_until timestamptz
+);
+GRANT ALL ON public.bot_order_guards TO service_role;
+ALTER TABLE public.bot_order_guards ENABLE ROW LEVEL SECURITY;
+NOTIFY pgrst, 'reload schema';
