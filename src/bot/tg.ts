@@ -207,6 +207,8 @@ export async function editHtml(token: string, chatId: number, messageId: number,
 
 export const btn = (label: string, data: string) => iconButton(label, { callback_data: data });
 export const urlBtn = (label: string, url: string) => iconButton(label, { url });
+/** Native Telegram copy-to-clipboard button (Bot API 9.0 `copy_text`). */
+export const copyBtn = (label: string, text: string) => iconButton(label, { copy_text: { text } });
 export const kb = (...rows: any[][]) => ({ reply_markup: { inline_keyboard: rows } });
 export const money = (n: number) => `${Number(Number(n).toFixed(2))}$`;
 export const fmtDate = (d: any) => new Date(d).toISOString().slice(0, 16).replace("T", " ") + " UTC";
