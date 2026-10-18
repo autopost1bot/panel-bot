@@ -626,6 +626,7 @@ async function shopMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
 /** /start for a logged-in customer: welcome + inline buttons, and the
  *  persistent bottom keyboard once per session. */
 async function startWelcome(ctx: Ctx, reply: (h: string, e?: any) => any) {
+  if (ctx.bot.isMain && await showOrderBlock(ctx, reply)) return;
   if (!ctx.session.kbShown) {
     ctx.session.kbShown = true;
     await reply("⌨️ Menu", menuKb(ctx));
@@ -2066,7 +2067,8 @@ const ORDER_BLOCK_MS = 12 * 3600 * 1000;
 
 /** Minutes left on the account's order block (0 = not blocked). */
 async function orderBlockMinutes(db: any, accountId: number): Promise<number> {
-  const { data } = await db.from("bot_order_guards").select("blocked_until").eq("account_id", accountId).maybeSingle();
+  const { data, error } = await db.from("bot_order_guards").select("blocked_until").eq("account_id", accountId).maybeSingle();
+  if (error) throw error;
   if (!data?.blocked_until) return 0;
   const ms = new Date(data.blocked_until).getTime() - Date.now();
   return ms > 0 ? Math.ceil(ms / 60000) : 0;
@@ -2077,6 +2079,16 @@ function orderBlockText(waitMin: number): string {
   const m = waitMin % 60;
   const left = h > 0 ? `${h}h ${m}min` : `${m}min`;
   return `⛔️ <b>Too many cancelled orders.</b>\n\nYou cancelled ${MAX_DAILY_CANCELS} orders today, so new orders are blocked for <b>${left}</b>. Please try again after that.`;
+}
+
+/** Stop payment entry before pending invoice reuse or network/amount prompts. */
+async function showOrderBlock(ctx: Ctx, reply: (h: string, e?: any) => any): Promise<boolean> {
+  if (!ctx.session.accountId) return false;
+  const wait = await orderBlockMinutes(await getDb(), ctx.session.accountId);
+  if (wait <= 0) return false;
+  ctx.session.step = null;
+  await reply(orderBlockText(wait), kb([btn("🏠 Menu", "c:home")]));
+  return true;
 }
 
 /** Records one cancelled order. Returns the day's cancel count and whether
@@ -2123,6 +2135,7 @@ function paymentKb(id: number, withCancel: boolean, wallet?: string, amount?: nu
  *  allowing a new one (anti-spam: one invoice per user for 20 minutes). */
 async function showOpenPayment(ctx: Ctx, reply: (h: string, e?: any) => any): Promise<boolean> {
   if (!ctx.session.accountId) return false;
+  if (await showOrderBlock(ctx, reply)) return true;
   const p = await openPayment(ctx.session.accountId);
   if (!p) return false;
   const net = ((p as any).network ?? "bep20") as Network;
@@ -2134,14 +2147,16 @@ async function showOpenPayment(ctx: Ctx, reply: (h: string, e?: any) => any): Pr
 }
 
 async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "topup" | "sub", baseAmount: number, net: Network = "bep20") {
+  const accountId = ctx.session.accountId;
+  if (!accountId) { ctx.session.step = null; await reply("🔐 Please log in first."); return; }
   if (await showOpenPayment(ctx, reply)) return;
-  const db = await getDb();
-  const wait = await orderBlockMinutes(db, ctx.session.accountId!);
-  if (wait > 0) { await reply(orderBlockText(wait)); return; }
   const wallet = await getWallet(net);
   if (!wallet) { await reply(`⚠️ USDT (${NETWORK_LABEL[net]}) payments are not available yet. Please ask the admin.`); return; }
-  const p = await createPayment(ctx.session.accountId!, ctx.tgId, kind, baseAmount, net);
-  if (!p) { await reply("⚠️ Could not create the payment. Please try again."); return; }
+  const p = await createPayment(accountId, ctx.tgId, kind, baseAmount, net);
+  if (!p) {
+    if (await showOrderBlock(ctx, reply)) return;
+    await reply("⚠️ Could not create the payment. Please try again."); return;
+  }
   await reply(paymentText(p, wallet, net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, true, wallet, p.amount));
 }
 
@@ -2192,6 +2207,7 @@ async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, dat
     const id = Number(m[1]);
     const { data: p } = await db.from("crypto_payments").select("*").eq("id", id).maybeSingle();
     if (!p || p.account_id !== ctx.session.accountId) { await reply("❌ Payment not found."); return; }
+    if (await showOrderBlock(ctx, reply)) return;
     if (p.status !== "pending") { await reply(p.status === "paid" ? "✅ Payment confirmed!" : "⌛ This payment has expired. Please start a new one."); return; }
     const net = (p.network ?? "bep20") as Network;
     const wallet = await getWallet(net);
