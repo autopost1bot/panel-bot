@@ -601,9 +601,16 @@ async function supportUsername(bot: BotInfo): Promise<string | null> {
 
 /** Inline buttons shown under the welcome message. */
 async function welcomeRows(ctx: Ctx): Promise<any[][]> {
+  if (ctx.bot.isMain) {
+    // The main bot promotes subscriptions only — the key-shop buttons stay off
+    // the welcome message (the persistent keyboard still opens the shop).
+    const rows: any[][] = [[{ text: "🤖 Make My own Bot", callback_data: "tsub:cancel", style: "primary" }]];
+    if ((await getSetting(ctx.bot, "aff_enabled")) !== "0") rows.push([btn("💰 Affiliates", "aff:menu")]);
+    const sup = await supportUsername(ctx.bot);
+    if (sup) rows.push([urlBtn("💬 Support", `https://t.me/${sup}`)]);
+    return rows;
+  }
   const rows: any[][] = [[btn("🔑 Buy keys", "c:shop")], [btn("👤 Account", "c:me"), btn("🧾 My orders", "c:orders")]];
-  if (ctx.bot.isMain) rows.push([btn("🤖 Make My own Bot", "tsub:cancel")]);
-  if (ctx.bot.isMain && (await getSetting(ctx.bot, "aff_enabled")) !== "0") rows.push([btn("💰 Affiliates", "aff:menu")]);
   const sup = await supportUsername(ctx.bot);
   if (sup) rows.push([urlBtn("💬 Support", `https://t.me/${sup}`)]);
   return rows;
