@@ -2225,7 +2225,7 @@ function paymentMinutesLeft(createdAt: string): number {
   return Math.max(1, Math.ceil((new Date(createdAt).getTime() + PAYMENT_TTL_MS - Date.now()) / 60000));
 }
 
-function paymentKb(id: number, withCancel: boolean, wallet?: string, amount?: number): any {
+function paymentKb(id: number, wallet?: string, amount?: number): any {
   const rows: any[][] = [[btn("✅ I've paid", `pay:check:${id}`)]];
   // Native Telegram copy buttons — one tap copies to the clipboard.
   if (wallet && wallet !== "—") {
@@ -2234,11 +2234,7 @@ function paymentKb(id: number, withCancel: boolean, wallet?: string, amount?: nu
       copyBtn("📋 Copy address", wallet),
     ]);
   }
-  rows.push(
-    withCancel
-      ? [btn("🔄 Refresh", `pay:refresh:${id}`), btn("❌ Cancel", `pay:cancel:${id}`)]
-      : [btn("🔄 Refresh", `pay:refresh:${id}`), btn("🏠 Menu", "c:home")],
-  );
+  rows.push([btn("🔄 Refresh", `pay:refresh:${id}`), btn("❌ Cancel", `pay:cancel:${id}`)]);
   return kb(...rows);
 }
 
@@ -2253,7 +2249,7 @@ async function showOpenPayment(ctx: Ctx, reply: (h: string, e?: any) => any): Pr
   const wallet = await getWallet(net);
   const left = paymentMinutesLeft(p.created_at);
   ctx.session.step = null;
-  await reply(`⏳ <b>You already have a pending payment.</b>\nPlease complete it first — a new order can be created after it is paid or expires in <b>${left} min</b>.\n\n` + paymentText(p, wallet ?? "—", net, left), paymentKb(p.id, false, wallet ?? "—", p.amount));
+  await reply(`⏳ <b>You already have a pending payment.</b>\nPlease complete it first — a new order can be created after it is paid or expires in <b>${left} min</b>.\n\n` + paymentText(p, wallet ?? "—", net, left), paymentKb(p.id, wallet ?? "—", p.amount));
   return true;
 }
 
@@ -2268,7 +2264,7 @@ async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, 
     if (await showOrderBlock(ctx, reply)) return;
     await reply("⚠️ Could not create the payment. Please try again."); return;
   }
-  await reply(paymentText(p, wallet, net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, true, wallet, p.amount));
+  await reply(paymentText(p, wallet, net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, wallet, p.amount));
 }
 
 function paymentText(p: CryptoPayment, wallet: string, net: Network = "bep20", minutesLeft?: number): string {
@@ -2322,7 +2318,7 @@ async function handleCryptoPay(ctx: Ctx, reply: (h: string, e?: any) => any, dat
     if (p.status !== "pending") { await reply(p.status === "paid" ? "✅ Payment confirmed!" : "⌛ This payment has expired. Please start a new one."); return; }
     const net = (p.network ?? "bep20") as Network;
     const wallet = await getWallet(net);
-    await reply(paymentText(p, wallet ?? "—", net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, true, wallet ?? "—", p.amount));
+    await reply(paymentText(p, wallet ?? "—", net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, wallet ?? "—", p.amount));
     return;
   }
   if ((m = data.match(/^pay:check:(\d+)$/))) {

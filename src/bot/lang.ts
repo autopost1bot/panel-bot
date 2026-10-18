@@ -1251,7 +1251,17 @@ const EXTRA_PHRASES: Record<Exclude<Lang, "en">, Record<string, string>> = {
     " below to get started.": " — शुरू करने के लिए नीचे दिए बटन पर टैप करें।",
   },
 };
-for (const lang of ["ar", "ru", "tr", "hi"] as const) Object.assign(DICT[lang], EXTRA_PHRASES[lang]);
+const PAYMENT_PHRASES: Record<Exclude<Lang, "en">, string[]> = {
+  ar: ["ادفع ", " لمدة ", "يوماً", "دقيقة", "أكمل الدفع أولاً — يمكن إنشاء طلب جديد بعد الدفع أو انتهاء صلاحيته خلال ", "أرسل رابط العمولات إلى أصدقائك وعائلتك أو أي شخص مهتم بخدماتنا. ", "يمكنك كسب عمولة عن كل عملية بيع تتم عبر رابط الإحالة الخاص بك.", "تحصل على ", " رصيداً كلما اشترى شخص دعوتَه اشتراك بوت (مثلاً شهر واحد).", "USDT على "],
+  ru: ["Оплатить ", " за ", "дней", "мин.", "Сначала завершите оплату — новый заказ можно создать после оплаты или истечения срока через ", "Скопируйте партнёрскую ссылку и поделитесь с друзьями, семьёй или теми, кому интересны наши услуги. ", "Вы можете получать комиссию за каждую продажу по вашей реферальной ссылке.", "Вы получаете ", " на баланс каждый раз, когда приглашённый вами человек покупает подписку на бота (например, на месяц).", "USDT в сети "],
+  tr: ["Öde: ", " süre: ", "gün", "dk.", "Önce ödemeyi tamamlayın — ödeme yapıldıktan veya süresi dolduktan sonra yeni sipariş oluşturabilirsiniz. Kalan süre: ", "Ortaklık bağlantısını kopyalayıp arkadaşlarınızla, ailenizle veya hizmetlerimizle ilgilenenlerle paylaşın. ", "Referans bağlantınız üzerinden yapılan her satıştan komisyon kazanabilirsiniz.", "Kazancınız: ", " bakiye, davet ettiğiniz biri bot aboneliği satın aldığında (örneğin 1 ay).", "USDT ağı: "],
+  hi: ["भुगतान करें: ", " अवधि: ", "दिन", "मिनट", "पहले भुगतान पूरा करें — भुगतान होने या समय समाप्त होने के बाद नया ऑर्डर बनाया जा सकता है। शेष समय: ", "सहयोगी लिंक कॉपी करके दोस्तों, परिवार या हमारी सेवाओं में रुचि रखने वालों से साझा करें। ", "अपने रेफरल लिंक से होने वाली हर बिक्री पर कमीशन कमा सकते हैं।", "आपको मिलता है ", " बैलेंस, जब आपका आमंत्रित व्यक्ति बॉट की सदस्यता खरीदता है (जैसे 1 महीना)।", "USDT नेटवर्क: "],
+};
+const PAYMENT_SOURCES = ["Pay ", " for ", "days", "min", "Please complete it first — a new order can be created after it is paid or expires in ", "Copy the Affiliates link and share with your friends, family, or anyone who might be interested in our services. ", "You can earn commissions for every sale made through your referral link.", "You get ", " balance every time someone you invite buys a bot subscription (e.g. 1 month).", "USDT on "];
+for (const lang of ["ar", "ru", "tr", "hi"] as const) {
+  Object.assign(DICT[lang], EXTRA_PHRASES[lang]);
+  PAYMENT_SOURCES.forEach((source, i) => { if (i > 3) DICT[lang][source] = PAYMENT_PHRASES[lang][i] ?? source; });
+}
 
 // Longest keys first so "Add account" wins over "Account".
 const SORTED: Record<string, [string, string][]> = {};
@@ -1262,6 +1272,11 @@ for (const [lang, dict] of Object.entries(DICT)) {
 function applyDict(text: string, lang: string): string {
   const pairs = SORTED[lang];
   if (!pairs) return text;
+  const words = PAYMENT_PHRASES[lang as Exclude<Lang, "en">];
+  if (words) {
+    text = text.replace(/Pay (<b>[^<]+<\/b>) for (\d+) days\?/g, (_, amount, days) => `${words[0]}${amount}${words[1]}${days} ${words[2]}?`);
+    text = text.replace(/\b(\d+) (days|min)\b/g, (_, n, unit) => `${n} ${words[unit === "days" ? 2 : 3]}`);
+  }
   for (const [from, to] of pairs) {
     if (text.includes(from)) text = text.split(from).join(to);
   }
@@ -1309,9 +1324,20 @@ export function translateExtra(extra: Record<string, any>, lang: string): Record
         row.map(button =>
           typeof button === "string"
             ? translateLabel(button, lang)
-            : { ...button, text: translateLabel(String(button.text ?? ""), lang) },
+            : { ...button, text: translateActionLabel(String(button.text ?? ""), String(button.callback_data ?? ""), lang) },
         ),
       ),
     },
   };
+}
+
+/** Dynamic subscription labels are translated only on their stable UI actions. */
+function translateActionLabel(text: string, action: string, lang: string): string {
+  if (!isLang(lang) || lang === "en") return text;
+  const dict = DICT[lang];
+  if (action === "tsub:pay" || action.startsWith("tsub:crypto:") || action === "tsub:buy") {
+    return text.replace(/Pay from balance|Pay with USDT|Renew \+|Make my bot/g, phrase => dict[phrase] ?? phrase)
+      .replace(/\b(\d+) days\b/g, (_, n) => `${n} ${PAYMENT_PHRASES[lang][2]}`);
+  }
+  return translateLabel(text, lang);
 }
