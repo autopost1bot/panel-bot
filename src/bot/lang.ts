@@ -1216,6 +1216,43 @@ const DICT: Record<Exclude<Lang, "en">, Record<string, string>> = {
   },
 };
 
+// Additional shared UI phrases include errors returned by the inventory RPC.
+const EXTRA_PHRASES: Record<Exclude<Lang, "en">, Record<string, string>> = {
+  ar: {
+    "Not enough balance.": "الرصيد غير كافٍ.",
+    "Please ask the seller to add balance.": "يرجى طلب إضافة رصيد من البائع.",
+    "You have ": "لديك ",
+    ", need ": "، تحتاج إلى ",
+    "Tap ": "اضغط على ",
+    " below to get started.": " أدناه للبدء.",
+  },
+  ru: {
+    "Not enough balance.": "Недостаточно средств.",
+    "Please ask the seller to add balance.": "Попросите продавца пополнить баланс.",
+    "You have ": "У вас ",
+    ", need ": ", требуется ",
+    "Tap ": "Нажмите ",
+    " below to get started.": " ниже, чтобы начать.",
+  },
+  tr: {
+    "Not enough balance.": "Yetersiz bakiye.",
+    "Please ask the seller to add balance.": "Satıcıdan bakiye eklemesini isteyin.",
+    "You have ": "Bakiyeniz ",
+    ", need ": ", gereken ",
+    "Tap ": "Dokunun: ",
+    " below to get started.": " — başlamak için aşağıdaki düğmeye dokunun.",
+  },
+  hi: {
+    "Not enough balance.": "पर्याप्त बैलेंस नहीं है।",
+    "Please ask the seller to add balance.": "विक्रेता से बैलेंस जोड़ने के लिए कहें।",
+    "You have ": "आपके पास ",
+    ", need ": ", आवश्यक ",
+    "Tap ": "टैप करें: ",
+    " below to get started.": " — शुरू करने के लिए नीचे दिए बटन पर टैप करें।",
+  },
+};
+for (const lang of ["ar", "ru", "tr", "hi"] as const) Object.assign(DICT[lang], EXTRA_PHRASES[lang]);
+
 // Longest keys first so "Add account" wins over "Account".
 const SORTED: Record<string, [string, string][]> = {};
 for (const [lang, dict] of Object.entries(DICT)) {
@@ -1237,7 +1274,7 @@ export function translateHtml(html: string, lang: string): string {
   if (!html || lang === "en" || !SORTED[lang]) return html;
   return html
     .split(/(<code\b[^>]*>[\s\S]*?<\/code>|<pre\b[^>]*>[\s\S]*?<\/pre>|<tg-emoji\b[^>]*>[\s\S]*?<\/tg-emoji>)/g)
-    .map(part => (part.startsWith("<") ? part : applyDict(part, lang)))
+    .map(part => (/^<(?:code|pre|tg-emoji)\b/.test(part) ? part : applyDict(part, lang)))
     .join("");
 }
 
