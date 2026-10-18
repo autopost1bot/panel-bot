@@ -65,17 +65,19 @@ export type CryptoPayment = {
 };
 
 /** Create a pending payment with a unique cent suffix so the transfer is
- *  identifiable. Retries with a new suffix if the amount is taken. */
+ *  identifiable. Amounts climb sequentially from the exact price (30.00,
+ *  30.01, 30.02, ... up to +$1.00 max) so the buyer sends as little as
+ *  possible; retries with the next suffix if the amount is taken. */
 export async function createPayment(accountId: number, tgId: number, kind: "topup" | "sub", baseAmount: number, network: Network = "bep20"): Promise<CryptoPayment | null> {
   const db = await getDb();
   const { data: pending, error: readError } = await db.from("crypto_payments").select("amount").eq("status", "pending").eq("network", network);
   if (readError) throw readError;
-  const taken = new Set((pending ?? []).map((p: any) => Number(p.amount)));
-  for (let attempt = 0; attempt < 20; attempt++) {
-    const cents = Math.floor(Math.random() * 99) + 1; // .01 – .99
-    const amount = Math.floor(baseAmount) + cents / 100;
-    if (taken.has(amount)) continue;
-    taken.add(amount);
+  const taken = new Set((pending ?? []).map((p: any) => Math.round(Number(p.amount) * 100)));
+  const baseCents = Math.round(baseAmount) * 100;
+  for (let cents = 0; cents <= 99; cents++) {
+    if (taken.has(baseCents + cents)) continue;
+    taken.add(baseCents + cents);
+    const amount = (baseCents + cents) / 100;
     const { data, error } = await db.from("crypto_payments")
       .insert({ tenant_id: 0, account_id: accountId, tg_id: tgId, kind, amount, status: "pending", network })
       .select("*").single();
