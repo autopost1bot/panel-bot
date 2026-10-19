@@ -391,3 +391,21 @@ BEGIN
   RETURN jsonb_build_object('ok', true, 'id', t.id, 'expires_at', t.expires_at);
 END;
 $function$;
+
+-- Free trial v2: one per account (a removed user gets a fresh account), starts at bot connect.
+CREATE TABLE IF NOT EXISTS trial_claims_acc (account_id integer PRIMARY KEY, tg_id bigint, claimed_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE trial_claims_acc ENABLE ROW LEVEL SECURITY;
+CREATE OR REPLACE FUNCTION public.claim_trial(p_account integer, p_tg bigint, p_days integer)
+ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public'
+AS $function$
+DECLARE t record;
+BEGIN
+  IF EXISTS (SELECT 1 FROM tenant_bots WHERE owner_account_id = p_account) THEN RETURN jsonb_build_object('err', 'existing'); END IF;
+  INSERT INTO trial_claims_acc (account_id, tg_id) VALUES (p_account, p_tg) ON CONFLICT DO NOTHING;
+  IF NOT FOUND THEN RETURN jsonb_build_object('err', 'claimed'); END IF;
+  INSERT INTO tenant_bots (owner_account_id, owner_tg_id, expires_at, status)
+    VALUES (p_account, p_tg, now() + make_interval(days => p_days), 'active') RETURNING * INTO t;
+  INSERT INTO tenant_bot_payments (tenant_id, amount, days, note) VALUES (t.id, 0, p_days, 'trial');
+  RETURN jsonb_build_object('ok', true, 'id', t.id, 'expires_at', t.expires_at);
+END;
+$function$;
