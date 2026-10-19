@@ -370,3 +370,24 @@ CREATE TABLE IF NOT EXISTS public.bot_order_guards (
 GRANT ALL ON public.bot_order_guards TO service_role;
 ALTER TABLE public.bot_order_guards ENABLE ROW LEVEL SECURITY;
 NOTIFY pgrst, 'reload schema';
+
+-- Free trial: one per Telegram account, ever.
+CREATE TABLE IF NOT EXISTS trial_claims (tg_id bigint PRIMARY KEY, account_id integer, claimed_at timestamptz NOT NULL DEFAULT now());
+ALTER TABLE trial_claims ENABLE ROW LEVEL SECURITY;
+CREATE OR REPLACE FUNCTION public.claim_trial(p_account integer, p_tg bigint, p_days integer)
+ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public'
+AS $function$
+DECLARE t record;
+BEGIN
+  IF EXISTS (SELECT 1 FROM tenant_bots WHERE owner_account_id = p_account OR owner_tg_id = p_tg) THEN
+    INSERT INTO trial_claims (tg_id, account_id) VALUES (p_tg, p_account) ON CONFLICT DO NOTHING;
+    RETURN jsonb_build_object('err', 'existing');
+  END IF;
+  INSERT INTO trial_claims (tg_id, account_id) VALUES (p_tg, p_account) ON CONFLICT DO NOTHING;
+  IF NOT FOUND THEN RETURN jsonb_build_object('err', 'claimed'); END IF;
+  INSERT INTO tenant_bots (owner_account_id, owner_tg_id, expires_at, status)
+    VALUES (p_account, p_tg, now() + make_interval(days => p_days), 'active') RETURNING * INTO t;
+  INSERT INTO tenant_bot_payments (tenant_id, amount, days, note) VALUES (t.id, 0, p_days, 'trial');
+  RETURN jsonb_build_object('ok', true, 'id', t.id, 'expires_at', t.expires_at);
+END;
+$function$;
