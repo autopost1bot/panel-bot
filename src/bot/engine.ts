@@ -1198,7 +1198,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (clash) { await reply("❌ This bot is already used by another account.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: prev } = await db.from("tenant_bots").select("id, token").eq("owner_account_id", ctx.session.accountId!).maybeSingle();
       let trialEnds: string | null = null;
-      if (!prev) {
+      if (ctx.session.trialPending || !prev) {
         if (!ctx.session.trialPending) { ctx.session.step = null; await reply("⛔️ Please start a subscription or free trial first.", kb([btn("⬅️ Back", "tsub:cancel")])); return; }
         const { data: tr } = await db.rpc("claim_trial", { p_account: ctx.session.accountId!, p_tg: tgId, p_days: TRIAL_DAYS });
         if (!tr?.ok) { ctx.session.step = null; ctx.session.trialPending = undefined; await reply("ℹ️ Your free trial was already used.", kb([btn(`🚀 Make my bot — ${money(await getPrice(bot))}`, "tsub:buy")])); return; }
@@ -1206,7 +1206,9 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       }
       ctx.session.trialPending = undefined;
       const changing = !!(prev && prev.token);
-      if (changing && (await tokenCooldown(db, ctx.session.accountId!)) > 0) { ctx.session.step = null; await reply("⏳ You can change the bot token once every 24 hours."); return; }
+      const freeChange = changing && !(await getSetting(bot, `free_token_change_${ctx.session.accountId}`));
+      if (freeChange) await setSetting(bot, `free_token_change_${ctx.session.accountId}`, String(Date.now()));
+      if (changing && !freeChange && (await tokenCooldown(db, ctx.session.accountId!)) > 0) { ctx.session.step = null; await reply("⏳ You can change the bot token once every 24 hours."); return; }
       // Changing the token wipes the shop (categories, products, durations, keys); emoji/colors/settings stay.
       if (changing) {
         await clearCatalog(db, Number(prev.id));
@@ -2129,11 +2131,14 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
 async function trialAvailable(ctx: Ctx): Promise<boolean> {
   if (!ctx.bot.isMain || !ctx.session.accountId) return false;
   const db = await getDb();
-  const [{ data: t }, { data: c }] = await Promise.all([
-    db.from("tenant_bots").select("id").eq("owner_account_id", ctx.session.accountId).maybeSingle(),
+  const [tr, cr] = await Promise.all([
+    db.from("tenant_bots").select("id, status, expires_at").eq("owner_account_id", ctx.session.accountId).maybeSingle(),
     db.from("trial_claims_acc").select("account_id").eq("account_id", ctx.session.accountId).maybeSingle(),
   ]);
-  return !t && !c;
+  if (tr.error || cr.error) return false; // fail closed
+  const t = tr.data;
+  const active = t && t.status === "active" && new Date(t.expires_at) > new Date();
+  return !cr.data && !active;
 }
 
 /** Free-trial offer shown on /start; the 3 days start only when the bot token is connected. */
@@ -2188,6 +2193,13 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   if (data === "tsub:token") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
     const { data: cur } = await db.from("tenant_bots").select("token").eq("owner_account_id", ctx.session.accountId).maybeSingle();
+    const freeLeft = cur?.token && !(await getSetting(ctx.bot, `free_token_change_${ctx.session.accountId}`));
+    if (freeLeft) {
+      // One free change: no warning and no 24h wait; later changes show the warning.
+      ctx.session.step = { s: "await_token" };
+      await reply(`🔑 <b>Change bot token</b>\nYou have <b>1 free change</b>. Your shop catalog will start fresh on the new bot.\n\n` + tokenHelp(), kb([btn("❌ Cancel", "tsub:cancel")]));
+      return;
+    }
     if (cur?.token) {
       await reply(`⚠️ <b>Change bot token?</b>\n\nIf you continue:\n• All categories, products, durations and keys in your shop will be <b>deleted</b>.\n• Your new bot starts with an empty shop.\n• Your accounts, settings, emoji and colors stay.\n• You can change the token only <b>once every 24 hours</b>.\n\nDo you want to continue?`,
         kb([btn("✅ Continue", "tsub:token_go")], [btn("❌ Cancel", "tsub:cancel")]));
@@ -2197,6 +2209,14 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   }
   if (data === "tsub:trial") {
     if (!(await trialAvailable(ctx))) { await reply("ℹ️ Your free trial was already used. You can subscribe below.", kb([btn(`🚀 Make my bot — ${money(price)}`, "tsub:buy")])); return; }
+    const { data: cur } = await db.from("tenant_bots").select("token, bot_username").eq("owner_account_id", ctx.session.accountId!).maybeSingle();
+    if (cur?.token) {
+      // Bot already connected: the trial starts right now.
+      const { data: tr } = await db.rpc("claim_trial", { p_account: ctx.session.accountId!, p_tg: ctx.tgId, p_days: TRIAL_DAYS });
+      if (!tr?.ok) { await reply("ℹ️ Your free trial was already used.", kb([btn(`🚀 Make my bot — ${money(price)}`, "tsub:buy")])); return; }
+      await reply(`🎁 <b>You got a ${TRIAL_DAYS}-day free trial subscription!</b>\n\nYour bot${cur.bot_username ? " @" + escapeHtml(cur.bot_username) : ""} is active again.\nTrial ends: <b>${fmtDate(tr.expires_at)}</b>`, kb([btn("⬅️ My Own Bot", "tsub:cancel")]));
+      return;
+    }
     ctx.session.trialPending = true;
     ctx.session.step = { s: "await_token" };
     await reply(`🎁 <b>Start your ${TRIAL_DAYS}-day free trial</b>\n\nYour trial begins the moment your bot is connected.\n\n` + tokenHelp(), kb([btn("❌ Cancel", "tsub:cancel")]));
