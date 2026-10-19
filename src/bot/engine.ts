@@ -711,8 +711,8 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     if (ctx.isBoss) {
       await reply("🛠 <b>Admin panel</b>\nUse the buttons below. Premium emoji you type are saved automatically.", menuKb(ctx));
     } else if (ctx.session.accountId) {
-      if (bot.isMain) await trialInvite(ctx, reply);
       await startWelcome(ctx, reply);
+      if (bot.isMain) await trialInvite(ctx, reply);
     } else {
       const blocked = await blockedUsers(bot);
       if (blocked.includes(tgId)) {
@@ -754,8 +754,8 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         if (!acc) { await reply("⚠️ Something went wrong. Please send /start again."); return; }
         ctx.session.accountId = acc.id; ctx.session.username = acc.username;
         await recordLogin(ctx, acc.id);
-        await trialInvite(ctx, reply);
         await startWelcome(ctx, reply);
+        await trialInvite(ctx, reply);
         return;
       }
       // Reseller bots: notify the owner once, then ask for the username + password the owner created.
