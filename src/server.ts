@@ -108,7 +108,10 @@ async function expiryCheck() {
       const owner = Number(r.owner_tg_id);
       if (left <= 0) {
         await db.from("tenant_bots").update({ status: "expired" }).eq("id", r.id);
-        await sendHtml("main", owner, "⛔️ <b>Your bot subscription has expired.</b>\nRenew it from the main reseller bot → 🤖 My Own Bot");
+        const { data: paid } = await db.from("tenant_bot_payments").select("id").eq("tenant_id", r.id).neq("note", "trial").limit(1);
+        await sendHtml("main", owner, (paid ?? []).length
+          ? "⛔️ <b>Your bot subscription has expired.</b>\nRenew it from the main reseller bot → 🤖 My Own Bot"
+          : "⛔️ <b>Your 3-day free trial has ended.</b>\nRenew for 30 days to keep your bot running → 🤖 Make My own Bot");
       } else if (left <= 1 && r.reminded < 2) {
         await db.from("tenant_bots").update({ reminded: 2 }).eq("id", r.id);
         await sendHtml("main", owner, "⏰ Your bot subscription ends in <b>less than 1 day</b>. Renew from the main bot.");
