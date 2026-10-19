@@ -65,7 +65,7 @@ type Step =
   | { s: "stock_keys"; pid: number } | { s: "stock_review"; pid: number; keys: string[]; request: string }
   | { s: "cat_new"; then: "add" | "list" } | { s: "cat_name"; cid: number }
   | { s: "acc_user" } | { s: "acc_pass"; username: string } | { s: "bal_add" }
-  | { s: "broadcast" } | { s: "welcome" } | { s: "support" } | { s: "aff_amount" } | { s: "aff_cu" } | { s: "aff_ca"; acc: number; name: string } | { s: "rm_user" }
+  | { s: "broadcast" } | { s: "welcome" } | { s: "trial_text" } | { s: "support" } | { s: "aff_amount" } | { s: "aff_cu" } | { s: "aff_ca"; acc: number; name: string } | { s: "rm_user" }
   | { s: "topup"; cid: number } | { s: "deduct"; cid: number }
   | { s: "buy_qty"; pid: number } | { s: "cprice"; cid: number; pid: number }
   | { s: "pay_amount"; net?: Network }
@@ -552,7 +552,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("💬 Support username", "a:sup"), btn("👥 Logged-in users", "a:users:0")],
     [btn("✨ Premium emoji", "a:emoji"), btn("🎨 Button colors", "a:colors")],
     ...(ctx.bot.isMain ? [] : [[btn("💲 Custom prices", "a:cpu")]]),
-    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("🚫 Remove user", "a:rmu")]] : []),
+    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("🎁 Free trial bots", "a:ftb:0"), btn("🎁 Trial text", "a:trt")], [btn("🚫 Remove user", "a:rmu")]] : []),
   ));
 }
 
@@ -756,7 +756,11 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         // One free trial per Telegram account, ever (atomic in the database).
         const { data: trial } = await db.rpc("claim_trial", { p_account: acc.id, p_tg: tgId, p_days: TRIAL_DAYS });
         if (trial?.ok) {
-          await reply(`🎁 <b>You got a ${TRIAL_DAYS}-day free trial subscription!</b>\n\nTap 🤖 Make My own Bot, send your bot token and start selling.\nTrial ends: <b>${fmtDate(trial.expires_at)}</b>\n\nAfter the trial, renew for ${await getDays(bot)} days to keep your bot running.`);
+          const custom = await getSetting(bot, "trial_text");
+          const msg = custom
+            ? custom.replaceAll("{days}", String(TRIAL_DAYS)).replaceAll("{date}", fmtDate(trial.expires_at))
+            : `🎁 <b>You got a ${TRIAL_DAYS}-day free trial subscription!</b>\n\nTap 🤖 Make My own Bot, send your bot token and start selling.\nTrial ends: <b>${fmtDate(trial.expires_at)}</b>\n\nAfter the trial, renew for ${await getDays(bot)} days to keep your bot running.`;
+          await reply(msg);
         }
         await startWelcome(ctx, reply);
         return;
@@ -1176,6 +1180,13 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await setSetting(bot, "support_username", u);
       ctx.session.step = null;
       await reply(`✅ Support username saved: @${escapeHtml(u)}\nThe 💬 Support button now opens this chat.`, kb([btn("⬅️ Go back", "a:sup")]));
+      return;
+    }
+    case "trial_text": {
+      if (!ctx.isBoss) return;
+      await setSetting(bot, "trial_text", html);
+      ctx.session.step = null;
+      await reply("✅ Trial text saved:\n\n" + html, kb([btn("⬅️ Menu", "a:home")]));
       return;
     }
     case "welcome": {
@@ -1609,6 +1620,27 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return ask(ctx, reply, { s: "cprice", cid: Number(m[1]), pid: Number(m[2]) }, "💵 Enter the special price for this account (USD $), or send <code>-</code> to use the default price:");
   }
 
+  if (data === "a:trt" && own && bot.isMain) return ask(ctx, reply, { s: "trial_text" }, "🎁 Send the new free-trial message (premium emoji allowed).\n\nUse <code>{days}</code> for the trial length and <code>{date}</code> for the end date.");
+  const ftb = data.match(/^a:ftb:(\d+)$/);
+  if (ftb && own && bot.isMain) {
+    const { data: pays } = await db.from("tenant_bot_payments").select("tenant_id, note");
+    const trialIds = [...new Set((pays ?? []).filter((p: any) => p.note === "trial").map((p: any) => p.tenant_id))];
+    const paidIds = new Set((pays ?? []).filter((p: any) => p.note !== "trial").map((p: any) => p.tenant_id));
+    const { data: ts } = trialIds.length ? await db.from("tenant_bots").select("id, bot_username, owner_account_id, status, expires_at").in("id", trialIds).order("id") : { data: [] };
+    const ids = (ts ?? []).map((t: any) => t.owner_account_id);
+    const { data: accs } = ids.length ? await db.from("bot_accounts").select("id, username").in("id", ids) : { data: [] };
+    const nameOf = (id: number) => (accs ?? []).find((a: any) => a.id === id)?.username ?? "?";
+    const freeCount = (ts ?? []).filter((t: any) => !paidIds.has(t.id)).length;
+    const { items, page, pages } = pageSlice(ts ?? [], Number(ftb[1]));
+    const lines = items.map((t: any) => {
+      const live = t.status === "active" && new Date(t.expires_at) > new Date();
+      const kind = paidIds.has(t.id) ? "💳 Paid subscription" : live ? "🎁 Free trial" : "⛔️ Trial ended";
+      return `${kind} — ${escapeHtml(plainLabel(nameOf(t.owner_account_id)))}${t.bot_username ? " · @" + escapeHtml(t.bot_username) : ""} — until ${fmtDate(t.expires_at)}`;
+    });
+    await reply(`🎁 <b>Free trial bots</b>\nFree now: <b>${freeCount}</b> · Moved to paid: <b>${(ts ?? []).length - freeCount}</b>${pageLabel(page, pages)}\n\n${lines.join("\n") || "None yet."}`,
+      kb(...items.map((t: any) => [btn(`${paidIds.has(t.id) ? "💳" : "🎁"} ${plainLabel(nameOf(t.owner_account_id))}${t.bot_username ? " · @" + t.bot_username : ""}`, `a:tb:${t.id}`)]), ...pageNav("a:ftb", page, pages), [btn("⬅️ Back", "a:home")]));
+    return;
+  }
   // ── Main admin: view every reseller bot's catalog & keys
   const tbp = data.match(/^a:tbl:(\d+)$/);
   if ((data === "a:tb" || tbp) && own && bot.isMain) {
