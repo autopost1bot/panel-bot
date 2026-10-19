@@ -409,3 +409,23 @@ BEGIN
   RETURN jsonb_build_object('ok', true, 'id', t.id, 'expires_at', t.expires_at);
 END;
 $function$;
+
+-- Free trial v3: available to every account that never used it and has no active subscription.
+CREATE OR REPLACE FUNCTION public.claim_trial(p_account integer, p_tg bigint, p_days integer)
+ RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path TO 'public'
+AS $function$
+DECLARE t record;
+BEGIN
+  IF EXISTS (SELECT 1 FROM tenant_bots WHERE owner_account_id = p_account AND status = 'active' AND expires_at > now()) THEN
+    RETURN jsonb_build_object('err', 'active');
+  END IF;
+  INSERT INTO trial_claims_acc (account_id, tg_id) VALUES (p_account, p_tg) ON CONFLICT DO NOTHING;
+  IF NOT FOUND THEN RETURN jsonb_build_object('err', 'claimed'); END IF;
+  INSERT INTO tenant_bots (owner_account_id, owner_tg_id, expires_at, status)
+    VALUES (p_account, p_tg, now() + make_interval(days => p_days), 'active')
+  ON CONFLICT (owner_account_id) DO UPDATE SET expires_at = EXCLUDED.expires_at, status = 'active', reminded = 0, owner_tg_id = EXCLUDED.owner_tg_id
+  RETURNING * INTO t;
+  INSERT INTO tenant_bot_payments (tenant_id, amount, days, note) VALUES (t.id, 0, p_days, 'trial');
+  RETURN jsonb_build_object('ok', true, 'id', t.id, 'expires_at', t.expires_at);
+END;
+$function$;
