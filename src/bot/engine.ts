@@ -17,6 +17,7 @@ import { availableNetworks, checkPayment, createPayment, getWallet, openPayment,
 import { isLang, LANGS, translateExtra, translateHtml, translateLabel } from "./lang";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
+export const TRIAL_DAYS = 3;
 const L = { buy: "🛍 Buy keys", acc: "🏛 Account", out: "🚀 Log out", man: "🔧 Reseller", stock: "📦 Stock", stats: "📊 Statistics", lang: "🌐 Language" };
 
 // ─── Welcome message ─────────────────────────────────────────────────────────
@@ -752,6 +753,11 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         if (!acc) { await reply("⚠️ Something went wrong. Please send /start again."); return; }
         ctx.session.accountId = acc.id; ctx.session.username = acc.username;
         await recordLogin(ctx, acc.id);
+        // One free trial per Telegram account, ever (atomic in the database).
+        const { data: trial } = await db.rpc("claim_trial", { p_account: acc.id, p_tg: tgId, p_days: TRIAL_DAYS });
+        if (trial?.ok) {
+          await reply(`🎁 <b>You got a ${TRIAL_DAYS}-day free trial subscription!</b>\n\nTap 🤖 Make My own Bot, send your bot token and start selling.\nTrial ends: <b>${fmtDate(trial.expires_at)}</b>\n\nAfter the trial, renew for ${await getDays(bot)} days to keep your bot running.`);
+        }
         await startWelcome(ctx, reply);
         return;
       }
@@ -2102,11 +2108,14 @@ async function showMyBot(ctx: Ctx, reply: (h: string, e?: any) => any) {
       kb([btn(`🚀 Make my bot — ${money(price)}`, "tsub:buy")], [btn("⬅️ Go back", "c:home")]));
     return;
   }
+  const { data: paid } = await db.from("tenant_bot_payments").select("id").eq("tenant_id", t.id).neq("note", "trial").limit(1);
+  const trial = !(paid ?? []).length;
+  const left = Math.max(0, Math.ceil((new Date(t.expires_at).getTime() - Date.now()) / 86400000));
   const rows: any[][] = [[btn(`🔄 Renew +${days} days — ${money(price)}`, "tsub:buy")]];
   if (active) rows.push([btn(t.token ? "🔑 Change bot token" : "🔑 Send bot token", "tsub:token")]);
   rows.push([btn("⬅️ Go back", "c:home")]);
   await reply(
-    `🤖 <b>Your own bot</b>\n\nStatus: ${active ? "✅ Active" : "⛔️ Expired"}\nBot: ${t.bot_username ? "@" + escapeHtml(t.bot_username) : "— (token not added yet)"}\nValid until: <b>${fmtDate(t.expires_at)}</b>`,
+    `🤖 <b>Your own bot</b>\n\nStatus: ${active ? (trial ? `🎁 Free trial — ${left} day${left === 1 ? "" : "s"} left` : "✅ Active") : (trial ? `⛔️ Free trial ended — renew for ${days} days to keep your bot running` : "⛔️ Expired")}\nBot: ${t.bot_username ? "@" + escapeHtml(t.bot_username) : "— (token not added yet)"}\nValid until: <b>${fmtDate(t.expires_at)}</b>`,
     kb(...rows));
 }
 
