@@ -98,6 +98,13 @@ async function resolveBot(tenantId: number) {
   return { token: data.token, tenantId, ownerTgId: Number(data.owner_tg_id), isMain: false, adminTgIds: [] };
 }
 
+async function isTrial(tenantId: number): Promise<boolean> {
+  const db = await getDb();
+  const { data } = await db.from("tenant_bot_payments").select("note").eq("tenant_id", tenantId);
+  const rows = data ?? [];
+  return rows.some((p: any) => p.note === "trial") && !rows.some((p: any) => p.note !== "trial");
+}
+
 // Hourly: remind owners about expiring subscriptions and mark expired ones.
 async function expiryCheck() {
   try {
@@ -112,10 +119,14 @@ async function expiryCheck() {
         await sendHtml("main", owner, (paid ?? []).length
           ? "⛔️ <b>Your bot subscription has expired.</b>\nRenew it from the main reseller bot → 🤖 My Own Bot"
           : "⛔️ <b>Your 3-day free trial has ended.</b>\nRenew for 30 days to keep your bot running → 🤖 Make My own Bot");
-      } else if (left <= 1 && r.reminded < 2) {
+      } else if (left <= 0.5 && r.reminded < 3) {
+        await db.from("tenant_bots").update({ reminded: 3 }).eq("id", r.id);
+        await sendHtml("main", owner, "⏰ <b>Your subscription expires in 12 hours.</b>\nRenew now to keep your bot running without interruption.",
+          { reply_markup: { inline_keyboard: [[{ text: "🔄 Renew subscription", callback_data: "tsub:cancel", style: "primary" }]] } });
+      } else if (left <= 1 && r.reminded < 2 && !(await isTrial(r.id))) {
         await db.from("tenant_bots").update({ reminded: 2 }).eq("id", r.id);
         await sendHtml("main", owner, "⏰ Your bot subscription ends in <b>less than 1 day</b>. Renew from the main bot.");
-      } else if (left <= 3 && r.reminded < 1) {
+      } else if (left <= 3 && r.reminded < 1 && !(await isTrial(r.id))) {
         await db.from("tenant_bots").update({ reminded: 1 }).eq("id", r.id);
         await sendHtml("main", owner, "⏰ Your bot subscription ends in <b>3 days</b>. Renew from the main bot.");
       }
