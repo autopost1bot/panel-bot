@@ -73,7 +73,7 @@ type Step =
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
 
-type Session = { qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; kbShown?: boolean | undefined; kbLang?: string | undefined; lang?: string | undefined; identity?: { accountId: number; name: string; username: string } };
+type Session = { qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; trialPending?: boolean | undefined; kbShown?: boolean | undefined; kbLang?: string | undefined; lang?: string | undefined; identity?: { accountId: number; name: string; username: string } };
 
 export type BotInfo = {
   token: string;
@@ -711,6 +711,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     if (ctx.isBoss) {
       await reply("🛠 <b>Admin panel</b>\nUse the buttons below. Premium emoji you type are saved automatically.", menuKb(ctx));
     } else if (ctx.session.accountId) {
+      if (bot.isMain) await trialInvite(ctx, reply);
       await startWelcome(ctx, reply);
     } else {
       const blocked = await blockedUsers(bot);
@@ -753,15 +754,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         if (!acc) { await reply("⚠️ Something went wrong. Please send /start again."); return; }
         ctx.session.accountId = acc.id; ctx.session.username = acc.username;
         await recordLogin(ctx, acc.id);
-        // One free trial per Telegram account, ever (atomic in the database).
-        const { data: trial } = await db.rpc("claim_trial", { p_account: acc.id, p_tg: tgId, p_days: TRIAL_DAYS });
-        if (trial?.ok) {
-          const custom = await getSetting(bot, "trial_text");
-          const msg = custom
-            ? custom.replaceAll("{days}", String(TRIAL_DAYS)).replaceAll("{date}", fmtDate(trial.expires_at))
-            : `🎁 <b>You got a ${TRIAL_DAYS}-day free trial subscription!</b>\n\nTap 🤖 Make My own Bot, send your bot token and start selling.\nTrial ends: <b>${fmtDate(trial.expires_at)}</b>\n\nAfter the trial, renew for ${await getDays(bot)} days to keep your bot running.`;
-          await reply(msg);
-        }
+        await trialInvite(ctx, reply);
         await startWelcome(ctx, reply);
         return;
       }
@@ -1204,6 +1197,14 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       const { data: clash } = await db.from("tenant_bots").select("id").eq("token", raw).maybeSingle();
       if (clash) { await reply("❌ This bot is already used by another account.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       const { data: prev } = await db.from("tenant_bots").select("id, token").eq("owner_account_id", ctx.session.accountId!).maybeSingle();
+      let trialEnds: string | null = null;
+      if (!prev) {
+        if (!ctx.session.trialPending) { ctx.session.step = null; await reply("⛔️ Please start a subscription or free trial first.", kb([btn("⬅️ Back", "tsub:cancel")])); return; }
+        const { data: tr } = await db.rpc("claim_trial", { p_account: ctx.session.accountId!, p_tg: tgId, p_days: TRIAL_DAYS });
+        if (!tr?.ok) { ctx.session.step = null; ctx.session.trialPending = undefined; await reply("ℹ️ Your free trial was already used.", kb([btn(`🚀 Make my bot — ${money(await getPrice(bot))}`, "tsub:buy")])); return; }
+        trialEnds = fmtDate(tr.expires_at);
+      }
+      ctx.session.trialPending = undefined;
       const changing = !!(prev && prev.token);
       if (changing && (await tokenCooldown(db, ctx.session.accountId!)) > 0) { ctx.session.step = null; await reply("⏳ You can change the bot token once every 24 hours."); return; }
       // Changing the token wipes the shop (categories, products, durations, keys); emoji/colors/settings stay.
@@ -1222,7 +1223,8 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
         drop_pending_updates: true,
       }).catch((e: unknown) => console.error("tenant setWebhook failed", e));
       await ensureMenuCommands({ ...bot, token: raw, tenantId: Number(t.id), ownerTgId: tgId, isMain: false, adminTgIds: [] }).catch(() => {});
-      await reply(`🎉 <b>Your bot is live!</b>\n\nOpen @${escapeHtml(me.username)} and press /start — you are the admin there.`);
+      await reply(`🎉 <b>Your bot is live!</b>\n\nOpen @${escapeHtml(me.username)} and press /start — you are the admin there.` +
+        (trialEnds ? `\n\n🎁 <b>You got a ${TRIAL_DAYS}-day free trial subscription!</b>\nTrial ends: <b>${trialEnds}</b>\nRenew for ${await getDays(bot)} days anytime from 🤖 My Own Bot to keep it running.` : ""));
       return;
     }
   }
@@ -1620,7 +1622,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
     return ask(ctx, reply, { s: "cprice", cid: Number(m[1]), pid: Number(m[2]) }, "💵 Enter the special price for this account (USD $), or send <code>-</code> to use the default price:");
   }
 
-  if (data === "a:trt" && own && bot.isMain) return ask(ctx, reply, { s: "trial_text" }, "🎁 Send the new free-trial message (premium emoji allowed).\n\nUse <code>{days}</code> for the trial length and <code>{date}</code> for the end date.");
+  if (data === "a:trt" && own && bot.isMain) return ask(ctx, reply, { s: "trial_text" }, "🎁 Send the new free-trial offer shown on /start (premium emoji allowed).\n\nUse <code>{days}</code> for the trial length.");
   const ftb = data.match(/^a:ftb:(\d+)$/);
   if (ftb && own && bot.isMain) {
     const { data: pays } = await db.from("tenant_bot_payments").select("tenant_id, note");
@@ -2123,6 +2125,27 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
 
 // ─── My Own Bot subscription (main bot) ──────────────────────────────────────
 
+/** True when this account never had a bot and never used its free trial. */
+async function trialAvailable(ctx: Ctx): Promise<boolean> {
+  if (!ctx.bot.isMain || !ctx.session.accountId) return false;
+  const db = await getDb();
+  const [{ data: t }, { data: c }] = await Promise.all([
+    db.from("tenant_bots").select("id").eq("owner_account_id", ctx.session.accountId).maybeSingle(),
+    db.from("trial_claims_acc").select("account_id").eq("account_id", ctx.session.accountId).maybeSingle(),
+  ]);
+  return !t && !c;
+}
+
+/** Free-trial offer shown on /start; the 3 days start only when the bot token is connected. */
+async function trialInvite(ctx: Ctx, reply: (h: string, e?: any) => any) {
+  if (ctx.isBoss || !(await trialAvailable(ctx))) return;
+  const custom = await getSetting(ctx.bot, "trial_text");
+  const msg = custom
+    ? custom.replaceAll("{days}", String(TRIAL_DAYS)).replaceAll("{date}", "")
+    : `🎁 <b>${TRIAL_DAYS}-Day Free Trial — on us!</b>\n\nLaunch your own Telegram shop bot free for ${TRIAL_DAYS} days.\n\n✅ Full access to every feature\n⏳ Your ${TRIAL_DAYS} days start only when you connect your bot\n🚫 No payment needed to begin\n\nTap the button below, create a bot in @BotFather and send its token here.`;
+  await reply(msg, kb([btn(`🎁 Start ${TRIAL_DAYS}-day free trial`, "tsub:trial")]));
+}
+
 async function showMyBot(ctx: Ctx, reply: (h: string, e?: any) => any) {
   const db = await getDb();
   if (!ctx.session.accountId) {
@@ -2137,7 +2160,7 @@ async function showMyBot(ctx: Ctx, reply: (h: string, e?: any) => any) {
   if (!t) {
     await reply(
       `🤖 <b>Make your own bot</b>\n\nLaunch your own reseller bot in minutes — you are the admin:\n• Add products, set prices & costs\n• Load stock keys and sell instantly\n• Manage accounts & balances\n• Track orders & profit, broadcast to resellers\n• Premium emoji supported automatically\n\n💵 Price: <b>${money(price)}</b> / ${days} days (paid from your balance)`,
-      kb([btn(`🚀 Make my bot — ${money(price)}`, "tsub:buy")], [btn("⬅️ Go back", "c:home")]));
+      kb(...((await trialAvailable(ctx)) ? [[btn(`🎁 Start ${TRIAL_DAYS}-day free trial`, "tsub:trial")]] : []), [btn(`🚀 Make my bot — ${money(price)}`, "tsub:buy")], [btn("⬅️ Go back", "c:home")]));
     return;
   }
   const { data: paid } = await db.from("tenant_bot_payments").select("id").eq("tenant_id", t.id).neq("note", "trial").limit(1);
@@ -2171,6 +2194,13 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
       return;
     }
     data = "tsub:token_go";
+  }
+  if (data === "tsub:trial") {
+    if (!(await trialAvailable(ctx))) { await reply("ℹ️ Your free trial was already used. You can subscribe below.", kb([btn(`🚀 Make my bot — ${money(price)}`, "tsub:buy")])); return; }
+    ctx.session.trialPending = true;
+    ctx.session.step = { s: "await_token" };
+    await reply(`🎁 <b>Start your ${TRIAL_DAYS}-day free trial</b>\n\nYour trial begins the moment your bot is connected.\n\n` + tokenHelp(), kb([btn("❌ Cancel", "tsub:cancel")]));
+    return;
   }
   if (data === "tsub:token_go") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
