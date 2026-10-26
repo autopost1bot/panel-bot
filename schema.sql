@@ -429,3 +429,9 @@ BEGIN
   RETURN jsonb_build_object('ok', true, 'id', t.id, 'expires_at', t.expires_at);
 END;
 $function$;
+
+-- Polls (main bot): admin questions for logged-in users and their votes (one per account).
+CREATE TABLE IF NOT EXISTS polls (id serial PRIMARY KEY, tenant_id integer NOT NULL DEFAULT 0, question text NOT NULL, options jsonb NOT NULL DEFAULT '[]'::jsonb, status text NOT NULL DEFAULT 'open', created_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE IF NOT EXISTS poll_votes (poll_id integer NOT NULL REFERENCES polls(id) ON DELETE CASCADE, account_id integer NOT NULL REFERENCES bot_accounts(id) ON DELETE CASCADE, tg_id bigint, tg_name text, option_idx integer NOT NULL, voted_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (poll_id, account_id));
+ALTER TABLE polls ENABLE ROW LEVEL SECURITY;
+ALTER TABLE poll_votes ENABLE ROW LEVEL SECURITY;
