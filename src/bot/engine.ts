@@ -65,7 +65,7 @@ type Step =
   | { s: "stock_keys"; pid: number } | { s: "stock_review"; pid: number; keys: string[]; request: string }
   | { s: "cat_new"; then: "add" | "list" } | { s: "cat_name"; cid: number }
   | { s: "acc_user" } | { s: "acc_pass"; username: string } | { s: "bal_add" }
-  | { s: "broadcast" } | { s: "welcome" } | { s: "trial_text" } | { s: "support" } | { s: "aff_amount" } | { s: "aff_cu" } | { s: "aff_ca"; acc: number; name: string } | { s: "rm_user" }
+  | { s: "broadcast" } | { s: "welcome" } | { s: "trial_text" } | { s: "support" } | { s: "aff_amount" } | { s: "aff_cu" } | { s: "aff_ca"; acc: number; name: string } | { s: "rm_user" } | { s: "poll_q" } | { s: "poll_opts"; q: string } | { s: "poll_ready"; q: string; opts: string[] }
   | { s: "topup"; cid: number } | { s: "deduct"; cid: number }
   | { s: "buy_qty"; pid: number } | { s: "cprice"; cid: number; pid: number }
   | { s: "pay_amount"; net?: Network }
@@ -552,7 +552,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("💬 Support username", "a:sup"), btn("👥 Logged-in users", "a:users:0")],
     [btn("✨ Premium emoji", "a:emoji"), btn("🎨 Button colors", "a:colors")],
     ...(ctx.bot.isMain ? [] : [[btn("💲 Custom prices", "a:cpu")]]),
-    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("🎁 Free trial bots", "a:ftb:0"), btn("🎁 Trial text", "a:trt")], [btn("🚫 Remove user", "a:rmu")]] : []),
+    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("🎁 Free trial bots", "a:ftb:0"), btn("🎁 Trial text", "a:trt")], [btn("🚫 Remove user", "a:rmu"), btn("📊 Polls", "a:poll:0")]] : []),
   ));
 }
 
@@ -1107,6 +1107,20 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(`✅ New balance for <b>${escapeHtml(c.username)}</b>: <b>${money(c.balance)}</b>`, kb([btn("⬅️ Account", `a:m:${step.cid}`)]));
       return;
     }
+    case "poll_q": {
+      if (!ctx.isBoss || !bot.isMain) return;
+      if (!html) { await reply("❌ Please send the question text.", kb([btn("✖️ Cancel", "a:poll:0")])); return; }
+      return ask(ctx, reply, { s: "poll_opts", q: html }, "📝 Send the answer options, one per line (2–10):", kb([btn("✖️ Cancel", "a:poll:0")]));
+    }
+    case "poll_opts": {
+      if (!ctx.isBoss || !bot.isMain) return;
+      const opts = parsePollOptions(raw);
+      if (!opts) { await reply("❌ Send 2–10 options, one per line (max 60 characters each).", kb([btn("✖️ Cancel", "a:poll:0")])); return; }
+      ctx.session.step = { s: "poll_ready", q: step.q, opts };
+      await reply(`📊 <b>Poll preview</b>\n\n${step.q}\n\n${opts.map((o, i) => `${i + 1}. ${escapeHtml(o)}`).join("\n")}`,
+        kb([btn("📤 Send", "a:poll:send")], [btn("✖️ Cancel", "a:poll:0")]));
+      return;
+    }
     case "broadcast": {
       if (!ctx.isBoss) return;
       ctx.session.step = null;
@@ -1250,6 +1264,8 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (ap) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ap[1])); }
   if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : ctx.session.accountId ? shopMenu(ctx, reply) : handleText(ctx, reply, "/start", [], save); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
+  if ((m = data.match(/^poll:v:(\d+):(\d+)$/))) return pollVote(ctx, reply, Number(m[1]), Number(m[2]));
+  if (own && bot.isMain && data.startsWith("a:poll")) return pollAdmin(ctx, reply, data);
 
   // ── Language picker (both bots, every user)
   if (data === "lang") return languageMenu(ctx, reply);
@@ -1791,6 +1807,117 @@ function pageSlice<T>(items: T[], requested: number): { items: T[]; page: number
   const page = Math.min(Math.max(0, requested || 0), pages - 1);
   return { items: items.slice(page * LIST_PER_PAGE, page * LIST_PER_PAGE + LIST_PER_PAGE), page, pages };
 }
+// ── Polls (main bot): admin asks logged-in users, sees who voted what.
+export function parsePollOptions(raw: string): string[] | null {
+  const opts = raw.split(/\r?\n/).map((o) => o.trim()).filter(Boolean);
+  if (opts.length < 2 || opts.length > 10 || opts.some((o) => o.length > 60)) return null;
+  return opts;
+}
+const pollOpts = (p: any): string[] => (Array.isArray(p?.options) ? p.options : JSON.parse(p?.options ?? "[]"));
+
+async function pollVote(ctx: Ctx, reply: (h: string, e?: any) => any, id: number, idx: number) {
+  const db = await getDb();
+  const { data: p } = await db.from("polls").select("*").eq("id", id).eq("tenant_id", ctx.bot.tenantId).maybeSingle();
+  const opts = p ? pollOpts(p) : [];
+  if (!p || !opts[idx]) { await reply("❌ This poll no longer exists."); return; }
+  if (p.status !== "open") { await reply("🔒 This poll is closed."); return; }
+  const acc = ctx.session.accountId;
+  if (!acc) { await reply("🔐 Please log in to vote."); return; }
+  const { data: old } = await db.from("poll_votes").select("poll_id").eq("poll_id", id).eq("account_id", acc).maybeSingle();
+  const row = { option_idx: idx, tg_id: ctx.tgId, tg_name: ctx.firstName || null, voted_at: new Date().toISOString() };
+  const { error } = old
+    ? await db.from("poll_votes").update(row).eq("poll_id", id).eq("account_id", acc)
+    : await db.from("poll_votes").insert({ poll_id: id, account_id: acc, ...row });
+  if (error) { await reply("❌ Could not save your vote. Please try again."); return; }
+  await reply(`${p.question}\n\n✅ Your vote: <b>${escapeHtml(opts[idx]!)}</b>`, kb(...opts.map((o, i) => [btn(`${i === idx ? "✓ " : ""}${o}`, `poll:v:${id}:${i}`)])));
+}
+
+async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
+  const db = await getDb();
+  const T = ctx.bot.tenantId;
+  let m: RegExpMatchArray | null;
+  if (data === "a:poll:new") return ask(ctx, reply, { s: "poll_q" }, "📊 Send the poll question (premium emoji allowed):", kb([btn("✖️ Cancel", "a:poll:0")]));
+  if (data === "a:poll:send") {
+    const st = ctx.session.step;
+    if (st?.s !== "poll_ready") return pollAdmin(ctx, reply, "a:poll:0");
+    ctx.session.step = null;
+    const { data: p, error } = await db.from("polls").insert({ tenant_id: T, question: st.q, options: st.opts, status: "open" }).select("*").single();
+    if (error || !p) { await reply("❌ Could not create the poll.", kb([btn("⬅️ Go back", "a:poll:0")])); return; }
+    const { data: cs } = await db.from("bot_accounts").select("tg_id").eq("tenant_id", T).not("tg_id", "is", null);
+    const extra = { reply_markup: { inline_keyboard: st.opts.map((o, i) => [{ text: o, callback_data: `poll:v:${p.id}:${i}` }]) } };
+    let ok = 0;
+    for (const c of cs ?? []) { if (await sendHtml(ctx.bot.token, Number(c.tg_id), `📊 ${st.q}`, extra).catch(() => null)) ok++; await new Promise((r) => setTimeout(r, 40)); }
+    await reply(`✅ Poll sent to ${ok}/${(cs ?? []).length} users.`, kb([btn("📊 View results", `a:poll:v:${p.id}`)], [btn("⬅️ Go back", "a:poll:0")]));
+    return;
+  }
+  if ((m = data.match(/^a:poll:(\d+)$/))) {
+    if (ctx.session.step?.s.startsWith("poll")) ctx.session.step = null;
+    const { data: ps } = await db.from("polls").select("id,question,status").eq("tenant_id", T).order("id", { ascending: false });
+    const all = ps ?? [];
+    const pages = Math.max(1, Math.ceil(all.length / 10));
+    const page = Math.max(0, Math.min(Number(m[1]), pages - 1));
+    const items = all.slice(page * 10, page * 10 + 10);
+    const short = (q: string) => { const t = plainLabel(q.replace(/<[^>]+>/g, "")).replace(/\s+/g, " "); return t.length > 40 ? t.slice(0, 39) + "…" : t; };
+    await reply(`📊 <b>Polls</b>${pageLabel(page, pages)}\n\n${items.length ? "Tap a poll to see results." : "No polls yet."}`, kb(
+      [btn("➕ New poll", "a:poll:new")],
+      ...items.map((p: any) => [btn(`${p.status === "open" ? "🟢" : "🔒"} #${p.id} ${short(p.question)}`, `a:poll:v:${p.id}`)]),
+      ...pageNav("a:poll", page, pages),
+      [btn("⬅️ Go back", "a:home")],
+    ));
+    return;
+  }
+  const load = async (id: number) => (await db.from("polls").select("*").eq("id", id).eq("tenant_id", T).maybeSingle()).data;
+  if ((m = data.match(/^a:poll:v:(\d+)$/))) {
+    const p = await load(Number(m[1]));
+    if (!p) return pollAdmin(ctx, reply, "a:poll:0");
+    const opts = pollOpts(p);
+    const { data: vs } = await db.from("poll_votes").select("option_idx").eq("poll_id", p.id);
+    const votes = vs ?? [];
+    const lines = opts.map((o, i) => {
+      const n = votes.filter((v: any) => v.option_idx === i).length;
+      const pct = votes.length ? Math.round((n / votes.length) * 100) : 0;
+      return `${i + 1}. ${escapeHtml(o)} — <b>${n}</b> (${pct}%)`;
+    });
+    await reply(`📊 <b>Poll #${p.id}</b> · ${p.status === "open" ? "🟢 Open" : "🔒 Closed"}\n\n${p.question}\n\n${lines.join("\n")}\n\n👥 Total votes: <b>${votes.length}</b>`, kb(
+      [btn("👥 Voters", `a:poll:w:${p.id}:0`)],
+      ...(p.status === "open" ? [[btn("🔒 Close poll", `a:poll:c:${p.id}`)]] : []),
+      [btn("🗑 Delete", `a:poll:d:${p.id}`)],
+      [btn("⬅️ Go back", "a:poll:0")],
+    ));
+    return;
+  }
+  if ((m = data.match(/^a:poll:w:(\d+):(\d+)$/))) {
+    const p = await load(Number(m[1]));
+    if (!p) return pollAdmin(ctx, reply, "a:poll:0");
+    const opts = pollOpts(p);
+    const { data: vs } = await db.from("poll_votes").select("account_id,option_idx,tg_name").eq("poll_id", p.id).order("option_idx", { ascending: true });
+    const votes = vs ?? [];
+    const ids = [...new Set(votes.map((v: any) => v.account_id))];
+    const { data: accs } = ids.length ? await db.from("bot_accounts").select("id,username,tg_name,tg_username").in("id", ids) : { data: [] };
+    const pages = Math.max(1, Math.ceil(votes.length / 10));
+    const page = Math.max(0, Math.min(Number(m[2]), pages - 1));
+    const lines = votes.slice(page * 10, page * 10 + 10).map((v: any) => {
+      const a: any = (accs ?? []).find((x: any) => x.id === v.account_id) ?? {};
+      const name = a.tg_name || v.tg_name || a.username || "?";
+      return `• ${escapeHtml(name)}${a.tg_username ? ` (@${escapeHtml(a.tg_username)})` : ""} · ${escapeHtml(a.username ?? "?")} → <b>${escapeHtml(opts[v.option_idx] ?? "?")}</b>`;
+    });
+    await reply(`👥 <b>Voters — Poll #${p.id}</b>${pageLabel(page, pages)}\n\n${lines.join("\n") || "No votes yet."}`, kb(
+      ...pageNav(`a:poll:w:${p.id}`, page, pages),
+      [btn("⬅️ Go back", `a:poll:v:${p.id}`)],
+    ));
+    return;
+  }
+  if ((m = data.match(/^a:poll:c:(\d+)$/))) {
+    await db.from("polls").update({ status: "closed" }).eq("id", Number(m[1])).eq("tenant_id", T);
+    return pollAdmin(ctx, reply, `a:poll:v:${m[1]}`);
+  }
+  if ((m = data.match(/^a:poll:d:(\d+)$/))) {
+    await db.from("poll_votes").delete().eq("poll_id", Number(m[1]));
+    await db.from("polls").delete().eq("id", Number(m[1])).eq("tenant_id", T);
+    return pollAdmin(ctx, reply, "a:poll:0");
+  }
+}
+
 function pageNav(prefix: string, page: number, pages: number): any[][] {
   const nav: any[] = [];
   if (page > 0) nav.push(btn("⬅️ Previous", `${prefix}:${page - 1}`));
