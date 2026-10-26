@@ -435,3 +435,4 @@ CREATE TABLE IF NOT EXISTS polls (id serial PRIMARY KEY, tenant_id integer NOT N
 CREATE TABLE IF NOT EXISTS poll_votes (poll_id integer NOT NULL REFERENCES polls(id) ON DELETE CASCADE, account_id integer NOT NULL REFERENCES bot_accounts(id) ON DELETE CASCADE, tg_id bigint, tg_name text, option_idx integer NOT NULL, voted_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (poll_id, account_id));
 ALTER TABLE polls ENABLE ROW LEVEL SECURITY;
 ALTER TABLE poll_votes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE polls ADD COLUMN IF NOT EXISTS translations jsonb NOT NULL DEFAULT '{}'::jsonb;
