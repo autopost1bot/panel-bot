@@ -1876,12 +1876,12 @@ export function parsePollOptions(raw: string): string[] | null {
 }
 const pollOpts = (p: any): string[] => (Array.isArray(p?.options) ? p.options : JSON.parse(p?.options ?? "[]"));
 const POLL_LANGS = ["ar", "ru", "tr", "hi"] as const;
-const POLL_TEXT: Record<string, { vote: string; closed: string; login: string }> = {
-  en: { vote: "Your vote", closed: "This poll is closed.", login: "Please log in to vote." },
-  ar: { vote: "صوتك", closed: "هذا الاستطلاع مغلق.", login: "يرجى تسجيل الدخول للتصويت." },
-  ru: { vote: "Ваш голос", closed: "Этот опрос закрыт.", login: "Войдите, чтобы проголосовать." },
-  tr: { vote: "Oyunuz", closed: "Bu anket kapandı.", login: "Oy vermek için lütfen giriş yapın." },
-  hi: { vote: "आपका वोट", closed: "यह पोल बंद है।", login: "वोट देने के लिए कृपया लॉग इन करें।" },
+const POLL_TEXT: Record<string, { vote: string; closed: string; login: string; final: string }> = {
+  en: { vote: "Your vote", closed: "This poll is closed.", login: "Please log in to vote.", final: "You have already voted. Your vote is final and cannot be changed." },
+  ar: { vote: "صوتك", closed: "هذا الاستطلاع مغلق.", login: "يرجى تسجيل الدخول للتصويت.", final: "لقد صوّتت بالفعل. صوتك نهائي ولا يمكن تغييره." },
+  ru: { vote: "Ваш голос", closed: "Этот опрос закрыт.", login: "Войдите, чтобы проголосовать.", final: "Вы уже проголосовали. Ваш голос окончательный и не может быть изменён." },
+  tr: { vote: "Oyunuz", closed: "Bu anket kapandı.", login: "Oy vermek için lütfen giriş yapın.", final: "Zaten oy kullandınız. Oyunuz kesin ve değiştirilemez." },
+  hi: { vote: "आपका वोट", closed: "यह पोल बंद है।", login: "वोट देने के लिए कृपया लॉग इन करें।", final: "आप पहले ही वोट दे चुके हैं। आपका वोट अंतिम है और इसे बदला नहीं जा सकता।" },
 };
 const pollText = (lang: string) => POLL_TEXT[lang] ?? POLL_TEXT["en"]!;
 
@@ -1937,13 +1937,16 @@ async function pollVote(ctx: Ctx, reply: (h: string, e?: any) => any, id: number
   if (p.status !== "open") { await reply(`🔒 ${T.closed}`); return; }
   const acc = ctx.session.accountId;
   if (!acc) { await reply(`🔐 ${T.login}`); return; }
-  const { data: old } = await db.from("poll_votes").select("poll_id").eq("poll_id", id).eq("account_id", acc).maybeSingle();
-  const row = { option_idx: idx, tg_id: ctx.tgId, tg_name: ctx.firstName || null, voted_at: new Date().toISOString() };
-  const { error } = old
-    ? await db.from("poll_votes").update(row).eq("poll_id", id).eq("account_id", acc)
-    : await db.from("poll_votes").insert({ poll_id: id, account_id: acc, ...row });
-  if (error) { await reply("❌ Could not save your vote. Please try again."); return; }
+  const { data: old } = await db.from("poll_votes").select("option_idx").eq("poll_id", id).eq("account_id", acc).maybeSingle();
   const v = pollIn(p, ctx.lang);
+  if (old) {
+    const prev = old.option_idx;
+    await reply(`📊 ${v.q}\n\n☑️ ${T.vote}: <b>${v.opts[prev] ?? ""}</b>\n\n🔒 ${T.final}`, kb(...v.opts.map((o, i) => [iconButton(i === prev ? "✓ " + o : o, { callback_data: `poll:v:${id}:${i}` })])));
+    return;
+  }
+  const row = { option_idx: idx, tg_id: ctx.tgId, tg_name: ctx.firstName || null, voted_at: new Date().toISOString() };
+  const { error } = await db.from("poll_votes").insert({ poll_id: id, account_id: acc, ...row });
+  if (error) { await reply("❌ Could not save your vote. Please try again."); return; }
   await reply(`📊 ${v.q}\n\n✅ ${T.vote}: <b>${v.opts[idx]!}</b>`, kb(...v.opts.map((o, i) => [iconButton(i === idx ? "✓ " + o : o, { callback_data: `poll:v:${id}:${i}` })])));
 }
 
