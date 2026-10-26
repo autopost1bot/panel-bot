@@ -1263,6 +1263,34 @@ for (const lang of ["ar", "ru", "tr", "hi"] as const) {
   PAYMENT_SOURCES.forEach((source, i) => { if (i > 3) DICT[lang][source] = PAYMENT_PHRASES[lang][i] ?? source; });
 }
 
+
+// Coupon phrases (customer side).
+const COUPON_SRC = ["Apply coupon", "Remove coupon", "Send your coupon code:", "Coupon removed.", "Coupon applied: ",
+  " applied — the discount is taken at checkout.", "Coupon discount: ", "Coupon is no longer valid.", "Coupon ",
+  "This coupon code is not valid.", "This coupon has expired.", "This coupon has been fully used.", "You already used this coupon.",
+  "This coupon is not valid for this product.", "Try again", "Please pay this discounted price from your balance."];
+const COUPON_TR: Record<Exclude<Lang, "en">, string[]> = {
+  ar: ["تطبيق القسيمة", "إزالة القسيمة", "أرسل رمز القسيمة:", "تمت إزالة القسيمة.", "تم تطبيق القسيمة: ",
+    " مُطبّقة — يُخصم الخصم عند الدفع.", "خصم القسيمة: ", "القسيمة لم تعد صالحة.", "القسيمة ",
+    "رمز القسيمة غير صالح.", "انتهت صلاحية هذه القسيمة.", "تم استخدام هذه القسيمة بالكامل.", "لقد استخدمت هذه القسيمة من قبل.",
+    "هذه القسيمة غير صالحة لهذا المنتج.", "حاول مرة أخرى", "يرجى دفع هذا السعر المخفّض من رصيدك."],
+  ru: ["Применить купон", "Убрать купон", "Отправьте код купона:", "Купон убран.", "Купон применён: ",
+    " применён — скидка будет учтена при оплате.", "Скидка по купону: ", "Купон больше не действует.", "Купон ",
+    "Неверный код купона.", "Срок действия купона истёк.", "Купон полностью израсходован.", "Вы уже использовали этот купон.",
+    "Этот купон не действует для этого товара.", "Попробовать снова", "Оплатите эту цену со скидкой с баланса."],
+  tr: ["Kupon uygula", "Kuponu kaldır", "Kupon kodunuzu gönderin:", "Kupon kaldırıldı.", "Kupon uygulandı: ",
+    " uygulandı — indirim ödemede düşülür.", "Kupon indirimi: ", "Kupon artık geçerli değil.", "Kupon ",
+    "Bu kupon kodu geçersiz.", "Bu kuponun süresi doldu.", "Bu kuponun kullanım hakkı bitti.", "Bu kuponu zaten kullandınız.",
+    "Bu kupon bu ürün için geçerli değil.", "Tekrar dene", "Lütfen bu indirimli fiyatı bakiyenizden ödeyin."],
+  hi: ["कूपन लगाएँ", "कूपन हटाएँ", "अपना कूपन कोड भेजें:", "कूपन हटा दिया गया।", "कूपन लगाया गया: ",
+    " लगाया गया — छूट भुगतान के समय मिलेगी।", "कूपन छूट: ", "कूपन अब मान्य नहीं है।", "कूपन ",
+    "यह कूपन कोड मान्य नहीं है।", "इस कूपन की समय-सीमा समाप्त हो गई है।", "यह कूपन पूरी तरह इस्तेमाल हो चुका है।", "आप यह कूपन पहले ही इस्तेमाल कर चुके हैं।",
+    "यह कूपन इस प्रोडक्ट के लिए मान्य नहीं है।", "फिर से कोशिश करें", "कृपया यह छूट वाली कीमत अपने बैलेंस से चुकाएँ।"],
+};
+for (const lang of ["ar", "ru", "tr", "hi"] as const) {
+  COUPON_SRC.forEach((source, i) => { DICT[lang][source] ??= COUPON_TR[lang][i] ?? source; });
+}
+
 // Longest keys first so "Add account" wins over "Account".
 const SORTED: Record<string, [string, string][]> = {};
 for (const [lang, dict] of Object.entries(DICT)) {

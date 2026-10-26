@@ -25,3 +25,15 @@ Upload all files of this folder to a new GitHub repository.
 
 Start command: `npm start` (Railway detects it automatically).
 Reseller bots added from the admin bot are connected to the same server automatically.
+
+## Backups & restore
+- Admin Panel → **💾 Backup**: send a backup now, or turn the daily backup (after 03:00 Dhaka time, sent to all admins) on/off.
+- The `.json.gz` file contains keys, password hashes and bot tokens — keep it private.
+- Restore on the VPS (this REPLACES all current bot data with the backup; it runs in one transaction):
+  ```bash
+  cd /path/to/panel-bot
+  node restore.mjs backup-YYYY-MM-DD.json.gz > /tmp/restore.sql      # multi-part: list all parts in order
+  sudo systemctl stop panel-bot 2>/dev/null || true                  # stop the bot while restoring
+  sudo -u postgres psql -v ON_ERROR_STOP=1 -d panelbot -f /tmp/restore.sql
+  sudo systemctl start panel-bot 2>/dev/null || true
+  ```

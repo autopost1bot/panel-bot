@@ -6,6 +6,7 @@ import { getDb } from "./bot/db";
 import { enqueueUpdate, drainUpdates, drainOutbox } from "./bot/reliability";
 import { sendHtml, tgCall, webhookSecret } from "./bot/tg";
 import { scanPayments } from "./bot/crypto";
+import { backupDue, sendBackup } from "./bot/backup";
 
 const PORT = Number(process.env["PORT"] ?? 3000);
 const PUBLIC_URL = (process.env["PUBLIC_URL"] ?? "").replace(/\/+$/, "");
@@ -134,6 +135,23 @@ async function expiryCheck() {
   } catch (e) { console.error("expiry check failed", e); }
 }
 
+// Daily database backup to every main-bot admin (after 03:00 Dhaka time).
+let backupRunning = false;
+async function dailyBackup() {
+  if (backupRunning) return;
+  backupRunning = true;
+  try {
+    const db = await getDb();
+    const { data: rows, error } = await db.from("bot_settings").select("key, value").eq("tenant_id", 0).in("key", ["backup_daily", "backup_last"]);
+    if (error) throw error;
+    const get = (k: string) => (rows ?? []).find((r: any) => r.key === k)?.value ?? null;
+    if (!backupDue(new Date(), get("backup_daily"), get("backup_last"))) return;
+    const ids = await adminIds();
+    if (ids.length) await sendBackup("main", ids);
+  } catch (e) { console.error("daily backup failed", e); }
+  finally { backupRunning = false; }
+}
+
 server.listen(PORT, async () => {
   console.log(`Panel bot listening on ${PORT}`);
   try {
@@ -161,6 +179,8 @@ server.listen(PORT, async () => {
   setInterval(deliverPending, 30_000);
   void expiryCheck();
   setInterval(expiryCheck, 60 * 60 * 1000);
+  void dailyBackup();
+  setInterval(dailyBackup, 30 * 60 * 1000);
   // Every minute: verify incoming BEP20 USDT payments automatically.
   const cryptoScan = () => scanPayments("main").catch((e) => console.error("crypto scan failed", e));
   void cryptoScan();

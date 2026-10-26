@@ -15,6 +15,7 @@ import { EMOJI_ICONS, EMOJI_LABELS, emojiTag, parseEmojiTheme, replaceNameIcon, 
 import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "./colors";
 import { availableNetworks, checkPayment, createPayment, getWallet, openPayment, PAYMENT_TTL_MS, isTronAddress, NETWORK_CHAIN, NETWORK_LABEL, type CryptoPayment, type Network } from "./crypto";
 import { isLang, LANGS, translateExtra, translateHtml, translateLabel } from "./lang";
+import { sendBackup } from "./backup";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
 export const TRIAL_DAYS = 3;
@@ -68,12 +69,15 @@ type Step =
   | { s: "broadcast" } | { s: "welcome" } | { s: "trial_text" } | { s: "support" } | { s: "aff_amount" } | { s: "aff_cu" } | { s: "aff_ca"; acc: number; name: string } | { s: "rm_user" } | { s: "poll_q" } | { s: "poll_opts"; q: string } | { s: "poll_ready"; q: string; opts: string[] }
   | { s: "topup"; cid: number } | { s: "deduct"; cid: number }
   | { s: "buy_qty"; pid: number } | { s: "cprice"; cid: number; pid: number }
+  | { s: "coupon_code"; pid: number }
+  | { s: "cpn_code" } | { s: "cpn_val"; code: string } | { s: "cpn_max"; code: string; kind: "pct" | "fixed"; value: number }
+  | { s: "cpn_days"; code: string; kind: "pct" | "fixed"; value: number; max: number | null }
   | { s: "pay_amount"; net?: Network }
   | { s: "await_token" }
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
 
-type Session = { qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; trialPending?: boolean | undefined; kbShown?: boolean | undefined; kbLang?: string | undefined; lang?: string | undefined; identity?: { accountId: number; name: string; username: string } };
+type Session = { coupon?: { id: number; code: string; pid: number } | undefined; qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; trialPending?: boolean | undefined; kbShown?: boolean | undefined; kbLang?: string | undefined; lang?: string | undefined; identity?: { accountId: number; name: string; username: string } };
 
 export type BotInfo = {
   token: string;
@@ -552,7 +556,8 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("💬 Support username", "a:sup"), btn("👥 Logged-in users", "a:users:0")],
     [btn("✨ Premium emoji", "a:emoji"), btn("🎨 Button colors", "a:colors")],
     ...(ctx.bot.isMain ? [] : [[btn("💲 Custom prices", "a:cpu")]]),
-    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("🎁 Free trial bots", "a:ftb:0"), btn("🎁 Trial text", "a:trt")], [btn("🚫 Remove user", "a:rmu"), btn("📊 Polls", "a:poll:0")]] : []),
+    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("🎁 Free trial bots", "a:ftb:0"), btn("🎁 Trial text", "a:trt")], [btn("🚫 Remove user", "a:rmu"), btn("📊 Polls", "a:poll:0")], [btn("💾 Backup", "a:bkp")]] : []),
+    [btn("🏷 Coupons", "a:cpn:0")],
   ));
 }
 
@@ -920,6 +925,51 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     }
 
     // ── Shopping
+    case "coupon_code": {
+      const back = step.pid ? `c:p:${step.pid}` : "tsub:buy";
+      const code = raw.toUpperCase();
+      const { data: c } = /^[A-Z0-9_-]{3,32}$/.test(code)
+        ? await db.from("coupons").select("id, code").eq("tenant_id", bot.tenantId).eq("code", code).maybeSingle()
+        : { data: null };
+      let base = 0;
+      if (step.pid) {
+        const { data: pr0 } = await db.from("products").select("id, price").eq("tenant_id", bot.tenantId).eq("id", step.pid).maybeSingle();
+        base = pr0 ? ctx.prices.get(Number(pr0.id)) ?? Number(pr0.price) : 0;
+      } else base = await getPrice(bot);
+      const q = c ? await couponQuote(ctx, c.id, step.pid || null, base) : { err: "invalid" };
+      if (q.err) { await reply("❌ " + couponError(q.err), kb([btn("🔁 Try again", step.pid ? `c:cpn:${step.pid}` : "tsub:cpn")], [btn("⬅️ Go back", back)])); ctx.session.step = null; return; }
+      ctx.session.step = null;
+      ctx.session.coupon = { id: c!.id, code: c!.code, pid: step.pid };
+      await reply(`✅ Coupon applied: <code>${escapeHtml(c!.code)}</code>`);
+      return step.pid ? handleCallback(ctx, reply, back, save) : handleSubscription(ctx, reply, "tsub:buy");
+    }
+    case "cpn_code": {
+      const code = raw.toUpperCase();
+      if (!/^[A-Z0-9_-]{3,32}$/.test(code)) { await reply("❌ Use 3–32 letters, numbers, - or _ (e.g. SAVE10).", kb([btn("✖️ Cancel", "a:cpn:0")])); return; }
+      const { data: ex } = await db.from("coupons").select("id").eq("tenant_id", bot.tenantId).eq("code", code).maybeSingle();
+      if (ex) { await reply("❌ This code already exists. Send another code:", kb([btn("✖️ Cancel", "a:cpn:0")])); return; }
+      return ask(ctx, reply, { s: "cpn_val", code }, "💸 Send the discount: a percent like <b>10%</b> or an amount like <b>5</b> ($):", kb([btn("✖️ Cancel", "a:cpn:0")]));
+    }
+    case "cpn_val": {
+      const v = parseCouponValue(raw);
+      if (!v) { await reply("❌ Send a percent from 1% to 100% or an amount above 0.", kb([btn("✖️ Cancel", "a:cpn:0")])); return; }
+      return ask(ctx, reply, { s: "cpn_max", code: step.code, ...v }, "🔢 How many times can it be used in total? Send a number, or <b>0</b> for unlimited:", kb([btn("✖️ Cancel", "a:cpn:0")]));
+    }
+    case "cpn_max": {
+      if (!(Number.isInteger(num) && num >= 0)) { await reply("❌ Send a whole number (0 = unlimited).", kb([btn("✖️ Cancel", "a:cpn:0")])); return; }
+      return ask(ctx, reply, { s: "cpn_days", code: step.code, kind: step.kind, value: step.value, max: num || null }, "📅 How many days should it stay valid? Send a number, or <b>0</b> for never expires:", kb([btn("✖️ Cancel", "a:cpn:0")]));
+    }
+    case "cpn_days": {
+      if (!(Number.isInteger(num) && num >= 0 && num <= 3650)) { await reply("❌ Send a whole number of days (0 = never).", kb([btn("✖️ Cancel", "a:cpn:0")])); return; }
+      ctx.session.step = null;
+      const { data: c, error } = await db.from("coupons").insert({
+        tenant_id: bot.tenantId, code: step.code, kind: step.kind, value: step.value, max_uses: step.max,
+        expires_at: num ? new Date(Date.now() + num * 86400000).toISOString() : null,
+      }).select("*").single();
+      if (error || !c) { await reply("❌ Could not create the coupon.", kb([btn("⬅️ Go back", "a:cpn:0")])); return; }
+      await reply(`✅ Coupon <code>${escapeHtml(c.code)}</code> created.`);
+      return couponAdmin(ctx, reply, `a:cpn:v:${c.id}`);
+    }
     case "buy_qty": {
       if (!(Number.isInteger(num) && num >= 1 && num <= 100)) { await reply("❌ Send a number from 1 to 100.", kb([btn("✖️ Cancel", "x:cancel")])); return; }
       ctx.session.step = null;
@@ -1266,6 +1316,13 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (data === "a:home" && own) return adminMenu(ctx, reply);
   if ((m = data.match(/^poll:v:(\d+):(\d+)$/))) return pollVote(ctx, reply, Number(m[1]), Number(m[2]));
   if (own && bot.isMain && data.startsWith("a:poll")) return pollAdmin(ctx, reply, data);
+  if (own && data.startsWith("a:cpn")) return couponAdmin(ctx, reply, data);
+  if (own && bot.isMain && data.startsWith("a:bkp")) return backupAdmin(ctx, reply, data);
+  if ((m = data.match(/^c:cpn:(\d+)$/))) {
+    if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    return ask(ctx, reply, { s: "coupon_code", pid: Number(m[1]) }, "🏷 Send your coupon code:", kb([btn("✖️ Cancel", `c:p:${m[1]}`)]));
+  }
+  if ((m = data.match(/^c:cpnx:(\d+)$/))) { ctx.session.coupon = undefined; await reply("🏷 Coupon removed."); data = `c:p:${m[1]}`; }
 
   // ── Language picker (both bots, every user)
   if (data === "lang") return languageMenu(ctx, reply);
@@ -1776,8 +1833,11 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
         ...pageNav(`c:p:${pid}`, page, pages), [btn("⬅️ Back", back)]));
       return;
     }
-    await reply(`${await fullName(db, bot.tenantId, p)}\n${p.description ? "\n" + p.description + "\n" : ""}\n💵 Price: <b>${pr(ctx, p)}</b>\n📦 In stock: ${p.stock}`,
-      p.stock ? kb([btn("🛒 Buy one", `c:buy:${pid}`), btn("🛒 Buy multiple", `c:bm:${pid}`)], [btn("⬅️ Back", back)]) : kb([btn("⬅️ Back", back)]));
+    const cpn = ctx.session.coupon?.pid === pid ? ctx.session.coupon : undefined;
+    await reply(`${await fullName(db, bot.tenantId, p)}\n${p.description ? "\n" + p.description + "\n" : ""}\n💵 Price: <b>${pr(ctx, p)}</b>\n📦 In stock: ${p.stock}` +
+      (cpn ? `\n\n🏷 Coupon <code>${escapeHtml(cpn.code)}</code> applied — the discount is taken at checkout.` : ""),
+      p.stock ? kb([btn("🛒 Buy one", `c:buy:${pid}`), btn("🛒 Buy multiple", `c:bm:${pid}`)],
+        [cpn ? btn("❌ Remove coupon", `c:cpnx:${pid}`) : btn("🏷 Apply coupon", `c:cpn:${pid}`)], [btn("⬅️ Back", back)]) : kb([btn("⬅️ Back", back)]));
     return;
   }
   if ((m = data.match(/^c:buy:(\d+)$/))) return buy(ctx, reply, Number(m[1]), 1);
@@ -1884,6 +1944,146 @@ async function pollVote(ctx: Ctx, reply: (h: string, e?: any) => any, id: number
   if (error) { await reply("❌ Could not save your vote. Please try again."); return; }
   const v = pollIn(p, ctx.lang);
   await reply(`📊 ${v.q}\n\n✅ ${T.vote}: <b>${escapeHtml(v.opts[idx]!)}</b>`, kb(...v.opts.map((o, i) => [btn(`${i === idx ? "✓ " : ""}${o}`, `poll:v:${id}:${i}`)])));
+}
+
+// ── Coupons (every shop): admin-made discount codes, one use per account.
+const COUPON_ERRORS: Record<string, string> = {
+  invalid: "This coupon code is not valid.",
+  expired: "This coupon has expired.",
+  used_up: "This coupon has been fully used.",
+  already: "You already used this coupon.",
+  product: "This coupon is not valid for this product.",
+};
+export const couponError = (code: string) => COUPON_ERRORS[code] ?? COUPON_ERRORS["invalid"]!;
+
+/** "10%" → percent, "5" / "$5" → fixed amount. */
+export function parseCouponValue(raw: string): { kind: "pct" | "fixed"; value: number } | null {
+  const t = raw.trim().replace(",", ".").replace(/\$/g, "");
+  const m = /^(\d+(?:\.\d+)?)\s*(%)?$/.exec(t);
+  if (!m) return null;
+  const value = Number(m[1]);
+  if (m[2]) return value >= 1 && value <= 100 ? { kind: "pct", value } : null;
+  return value > 0 ? { kind: "fixed", value: Math.round(value * 100) / 100 } : null;
+}
+
+const couponLabel = (c: any) => c.kind === "pct" ? `${Number(c.value)}%` : money(c.value);
+
+async function couponQuote(ctx: Ctx, id: number, pid: number | null, base: number): Promise<{ err?: string; off?: number; price?: number }> {
+  const db = await getDb();
+  const { data, error } = await db.rpc("coupon_discount", { p_tenant: ctx.bot.tenantId, p_coupon: id, p_account: ctx.session.accountId ?? 0, p_product: pid, p_base: base });
+  if (error || !data) return { err: "invalid" };
+  return data as any;
+}
+
+/** Subscription coupon: undefined = none applied, null = it stopped being valid. */
+async function subCouponQuote(ctx: Ctx, reply: (h: string, e?: any) => any, price: number): Promise<{ price: number; off: number } | null | undefined> {
+  const c = ctx.session.coupon;
+  if (!c || c.pid) return undefined;
+  const q = await couponQuote(ctx, c.id, null, price);
+  if (q.err) { ctx.session.coupon = undefined; await reply("❌ " + couponError(q.err)); return null; }
+  return { price: Number(q.price), off: Number(q.off) };
+}
+
+async function couponAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
+  const db = await getDb();
+  const T = ctx.bot.tenantId;
+  let m: RegExpMatchArray | null;
+  if (data === "a:cpn:new") return ask(ctx, reply, { s: "cpn_code" }, "🏷 Send the coupon code (e.g. SAVE10):", kb([btn("✖️ Cancel", "a:cpn:0")]));
+  const load = async (id: number) => (await db.from("coupons").select("*").eq("tenant_id", T).eq("id", id).maybeSingle()).data;
+  if ((m = data.match(/^a:cpn:t:(\d+)$/))) {
+    const c = await load(Number(m[1]));
+    if (c) await db.from("coupons").update({ active: !c.active }).eq("tenant_id", T).eq("id", c.id);
+    return couponAdmin(ctx, reply, `a:cpn:v:${m[1]}`);
+  }
+  if ((m = data.match(/^a:cpn:d:(\d+)$/))) {
+    const c = await load(Number(m[1]));
+    if (!c) return couponAdmin(ctx, reply, "a:cpn:0");
+    await reply(`🗑 Delete coupon <code>${escapeHtml(c.code)}</code>?`, kb([btn("✅ Yes, delete", `a:cpn:dd:${c.id}`)], [btn("⬅️ Go back", `a:cpn:v:${c.id}`)]));
+    return;
+  }
+  if ((m = data.match(/^a:cpn:dd:(\d+)$/))) {
+    await db.from("coupons").delete().eq("tenant_id", T).eq("id", Number(m[1]));
+    await reply("🗑 Coupon deleted.");
+    return couponAdmin(ctx, reply, "a:cpn:0");
+  }
+  if ((m = data.match(/^a:cpn:ps:(\d+):(\d+)$/))) {
+    const pid = Number(m[2]);
+    const ok = pid === 0 || (await db.from("products").select("id").eq("tenant_id", T).eq("id", pid).maybeSingle()).data;
+    if (ok) await db.from("coupons").update({ product_id: pid || null }).eq("tenant_id", T).eq("id", Number(m[1]));
+    return couponAdmin(ctx, reply, `a:cpn:v:${m[1]}`);
+  }
+  if ((m = data.match(/^a:cpn:p:(\d+):(\d+)$/))) {
+    const { data: ps } = await db.from("products").select("id, name").eq("tenant_id", T).is("parent_id", null).order("id");
+    const { items, page, pages } = pageSlice(ps ?? [], Number(m[2]));
+    await reply(`🎯 <b>Which product can use this coupon?</b>${pageLabel(page, pages)}`, { ...kb(
+      [btn("🌐 All products", `a:cpn:ps:${m[1]}:0`)],
+      ...items.map((p: any) => [btn(plainLabel(p.name), `a:cpn:ps:${m![1]}:${p.id}`)]),
+      ...pageNav(`a:cpn:p:${m[1]}`, page, pages), [btn("⬅️ Go back", `a:cpn:v:${m[1]}`)]), noButtonColors: true });
+    return;
+  }
+  if ((m = data.match(/^a:cpn:u:(\d+):(\d+)$/))) {
+    const c = await load(Number(m[1]));
+    if (!c) return couponAdmin(ctx, reply, "a:cpn:0");
+    const { data: us } = await db.from("coupon_uses").select("*").eq("coupon_id", c.id).order("id", { ascending: false });
+    const { items, page, pages } = pageSlice(us ?? [], Number(m[2]));
+    const ids = items.map((u: any) => u.account_id);
+    const { data: accs } = ids.length ? await db.from("bot_accounts").select("id, username").in("id", ids) : { data: [] };
+    const name = (id: number) => (accs ?? []).find((a: any) => a.id === id)?.username ?? `#${id}`;
+    const lines = items.map((u: any) => `• <code>${escapeHtml(name(u.account_id))}</code> · ${fmtDate(u.created_at)}${Number(u.amount_off) ? ` · -${money(u.amount_off)}` : ""}`);
+    await reply(`👥 <b>Used ${escapeHtml(c.code)}</b>${pageLabel(page, pages)}\n\n${lines.join("\n") || "Nobody yet."}`,
+      kb(...pageNav(`a:cpn:u:${c.id}`, page, pages), [btn("⬅️ Go back", `a:cpn:v:${c.id}`)]));
+    return;
+  }
+  if ((m = data.match(/^a:cpn:v:(\d+)$/))) {
+    const c = await load(Number(m[1]));
+    if (!c) return couponAdmin(ctx, reply, "a:cpn:0");
+    const prod = c.product_id ? (await db.from("products").select("name").eq("tenant_id", T).eq("id", c.product_id).maybeSingle()).data : null;
+    const expired = c.expires_at && new Date(c.expires_at).getTime() < Date.now();
+    await reply(`🏷 <b>Coupon</b> <code>${escapeHtml(c.code)}</code>\n\n` +
+      `💸 Discount: <b>${couponLabel(c)}</b>\n` +
+      `🔢 Used: <b>${c.uses}</b> / ${c.max_uses ?? "∞"}\n` +
+      `📅 Expires: <b>${c.expires_at ? fmtDate(c.expires_at) : "Never"}</b>${expired ? " (expired)" : ""}\n` +
+      `🎯 Applies to: <b>${c.product_id ? escapeHtml(plainLabel(prod?.name ?? "#" + c.product_id)) : ctx.bot.isMain ? "Bot subscription & all products" : "All products"}</b>\n` +
+      `Status: <b>${c.active ? "🟢 Active" : "⚪️ Off"}</b>`,
+      kb([btn(c.active ? "⏸ Turn off" : "▶️ Turn on", `a:cpn:t:${c.id}`), btn("👥 Used by", `a:cpn:u:${c.id}:0`)],
+        [btn("🎯 Product", `a:cpn:p:${c.id}:0`), btn("🗑 Delete", `a:cpn:d:${c.id}`)],
+        [btn("⬅️ Go back", "a:cpn:0")]));
+    return;
+  }
+  const req = Number(data.match(/^a:cpn:(\d+)$/)?.[1] ?? 0);
+  ctx.session.step = null;
+  const { data: cs } = await db.from("coupons").select("*").eq("tenant_id", T).order("id", { ascending: false });
+  const { items, page, pages } = pageSlice(cs ?? [], req);
+  await reply(`🏷 <b>Coupons</b>${pageLabel(page, pages)}\n\n${items.length ? "Tap a coupon to manage it." : "No coupons yet."}`, { ...kb(
+    [btn("➕ New coupon", "a:cpn:new")],
+    ...items.map((c: any) => [btn(`${c.active ? "🟢" : "⚪️"} ${c.code} · ${couponLabel(c)} · ${c.uses}/${c.max_uses ?? "∞"}`, `a:cpn:v:${c.id}`)]),
+    ...pageNav("a:cpn", page, pages), [btn("⬅️ Go back", "a:home")]), noButtonColors: true });
+}
+
+// ── Backup (main bot admins only)
+async function backupAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
+  if (data === "a:bkp:tg") {
+    const on = (await getSetting(ctx.bot, "backup_daily")) !== "0";
+    await setSetting(ctx.bot, "backup_daily", on ? "0" : "1");
+  }
+  if (data === "a:bkp:now") {
+    await reply("⏳ Creating backup…");
+    try {
+      await sendBackup(ctx.bot.token, [ctx.tgId]);
+      clearSettingCache();
+    } catch (e) {
+      console.error("backup failed", e);
+      await reply("❌ Backup failed. Please try again later.");
+    }
+  }
+  const on = (await getSetting(ctx.bot, "backup_daily")) !== "0";
+  const last = await getSetting(ctx.bot, "backup_last");
+  const [at, size] = (last ?? "").split("|");
+  await reply(`💾 <b>Backup</b>\n\n` +
+    `Daily backup: <b>${on ? "ON" : "OFF"}</b> (every day after 03:00 Dhaka time, sent to all admins)\n` +
+    `Last backup: <b>${at ? fmtDate(at) + " " + at.slice(11, 16) + " UTC" : "Never"}</b>${size ? ` · ${(Number(size) / 1024).toFixed(0)} KB` : ""}\n\n` +
+    `⚠️ The file contains keys and bot tokens — keep it private.`,
+    kb([btn("📤 Backup now", "a:bkp:now")], [btn(`🕒 Daily backup: ${on ? "ON" : "OFF"}`, "a:bkp:tg")], [btn("⬅️ Go back", "a:home")]));
 }
 
 async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
@@ -2272,7 +2472,10 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
   // A failed purchase returns to the bought product's duration list (its parent when a variant was bought).
   const { data: bought } = await db.from("products").select("parent_id").eq("id", pid).eq("tenant_id", ctx.bot.tenantId).maybeSingle();
   const backTo = bought?.parent_id ? `c:p:${bought.parent_id}` : `c:p:${pid}`;
-  const { data, error } = await db.rpc("buy_keys_once", { p_tenant: ctx.bot.tenantId, p_account: acc.id, p_product: pid, p_qty: qty, p_request: ctx.requestId });
+  const coupon = ctx.session.coupon?.pid === pid ? ctx.session.coupon : undefined;
+  const { data, error } = coupon
+    ? await db.rpc("buy_keys_coupon_once", { p_tenant: ctx.bot.tenantId, p_account: acc.id, p_product: pid, p_qty: qty, p_request: ctx.requestId, p_coupon: coupon.id })
+    : await db.rpc("buy_keys_once", { p_tenant: ctx.bot.tenantId, p_account: acc.id, p_product: pid, p_qty: qty, p_request: ctx.requestId });
   if (error) {
     if (ctx.bot.durable && !/STOCK:/.test(error.message ?? "")) throw error;
     const stockMatch = /STOCK:(\d+)/.exec(error.message ?? "");
@@ -2282,10 +2485,12 @@ async function buy(ctx: Ctx, reply: (h: string, e?: any) => any, pid: number, qt
   }
   if (!data) throw new Error("Missing purchase response");
   const res = data as any;
+  if (coupon && (res?.ok || res?.coupon_err)) ctx.session.coupon = undefined;
+  if (res?.coupon_err) { await reply("❌ " + couponError(res.coupon_err), kb([btn("⬅️ Back", backTo)])); return; }
   if (res?.err) { await reply("❌ " + res.err, kb([btn("⬅️ Back", backTo)])); return; }
   const header = `✅ <b>Purchase completed</b>\n` +
     `🔑 You bought <b>${escapeHtml(plainLabel(res.label))}</b> · Quantity: <b>${qty}</b>\n\n`;
-  const footer = `\n\n💬 New balance: <b>${money(res.balance)}</b>`;
+  const footer = (res.off ? `\n\n🏷 Coupon discount: <b>-${money(res.off)}</b>` : "") + `\n\n💬 New balance: <b>${money(res.balance)}</b>`;
   const keys = (res.keys as string[]).map((key) => `Key: <code>${escapeHtml(key)}</code>`);
   const receipts: string[] = [];
   let receipt = header;
@@ -2377,9 +2582,17 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   if (data === "tsub:crypto" || data === "tsub:crypto:bep20" || data === "tsub:crypto:trc20") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
     if (await showOpenPayment(ctx, reply)) return;
-    return startCryptoPayment(ctx, reply, "sub", price, data.endsWith("trc20") ? "trc20" : "bep20");
+    const q = await subCouponQuote(ctx, reply, price);
+    if (q === null) return;
+    if (q && q.price < 1) { await reply("❌ Please pay this discounted price from your balance.", kb([btn("⬅️ Go back", "tsub:buy")])); return; }
+    return startCryptoPayment(ctx, reply, "sub", q ? q.price : price, data.endsWith("trc20") ? "trc20" : "bep20", q ? ctx.session.coupon?.id : undefined);
   }
   if (data === "tsub:cancel") { ctx.session.step = null; return showMyBot(ctx, reply); }
+  if (data === "tsub:cpn") {
+    if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
+    return ask(ctx, reply, { s: "coupon_code", pid: 0 }, "🏷 Send your coupon code:", kb([btn("✖️ Cancel", "tsub:buy")]));
+  }
+  if (data === "tsub:cpnx") { ctx.session.coupon = undefined; await reply("🏷 Coupon removed."); data = "tsub:buy"; }
   if (data === "tsub:token") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
     const { data: cur } = await db.from("tenant_bots").select("token").eq("owner_account_id", ctx.session.accountId).maybeSingle();
@@ -2423,21 +2636,34 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
   if (data === "tsub:buy") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
     const nets = await availableNetworks();
-    const payRows = (nets.length ? nets : ["bep20"] as Network[]).map(n => [btn(`💳 Pay with USDT (${NETWORK_LABEL[n]})`, `tsub:crypto:${n}`)]);
-    await reply(`Pay <b>${money(price)}</b> for ${days} days?`,
-      kb([btn(`✅ Pay from balance — ${money(price)}`, "tsub:pay")], ...payRows, [btn("❌ Cancel", "tsub:no")]));
+    const q = await subCouponQuote(ctx, reply, price);
+    const pay = q ? q.price : price;
+    const payRows = pay >= 1 ? (nets.length ? nets : ["bep20"] as Network[]).map(n => [btn(`💳 Pay with USDT (${NETWORK_LABEL[n]})`, `tsub:crypto:${n}`)]) : [];
+    await reply(`Pay <b>${money(pay)}</b> for ${days} days?` + (q ? `\n\n🏷 Coupon <code>${escapeHtml(ctx.session.coupon?.code ?? "")}</code>: <s>${money(price)}</s> → <b>${money(pay)}</b>` : ""),
+      kb([btn(`✅ Pay from balance — ${money(pay)}`, "tsub:pay")], ...payRows,
+        [q ? btn("❌ Remove coupon", "tsub:cpnx") : btn("🏷 Apply coupon", "tsub:cpn")], [btn("❌ Cancel", "tsub:no")]));
     return;
   }
   if (data === "tsub:pay") {
     if (!ctx.session.accountId) { await reply("🔐 Please log in first."); return; }
-    const { data: res, error } = await db.rpc("buy_subscription_once", { p_account: ctx.session.accountId, p_tg: ctx.tgId, p_price: price, p_days: days, p_request: ctx.requestId });
+    const coupon = ctx.session.coupon && !ctx.session.coupon.pid ? ctx.session.coupon : undefined;
+    const { data: res, error } = coupon
+      ? await db.rpc("buy_subscription_coupon_once", { p_account: ctx.session.accountId, p_tg: ctx.tgId, p_price: price, p_days: days, p_request: ctx.requestId, p_coupon: coupon.id })
+      : await db.rpc("buy_subscription_once", { p_account: ctx.session.accountId, p_tg: ctx.tgId, p_price: price, p_days: days, p_request: ctx.requestId });
     if (error || !res) { if (ctx.bot.durable) throw error ?? new Error("Missing subscription response"); await reply("⚠️ Could not confirm payment. Please try again."); return; }
+    if ((res as any).coupon_err) {
+      ctx.session.coupon = undefined;
+      await reply("❌ " + couponError((res as any).coupon_err), kb([btn("⬅️ Go back", "tsub:buy")]));
+      return;
+    }
+    if (coupon && (res as any).ok) ctx.session.coupon = undefined;
+    const paidPrice = typeof (res as any).paid === "number" ? (res as any).paid : price;
     if ((res as any).err) {
-      await reply(`❌ Not enough balance. You have <b>${money((res as any).balance)}</b>, need <b>${money(price)}</b>. Please top up first.`);
+      await reply(`❌ Not enough balance. You have <b>${money((res as any).balance)}</b>, need <b>${money(paidPrice)}</b>. Please top up first.`);
       return;
     }
     const t = res as any;
-    await reply(`✅ Paid <b>${money(price)}</b>. Subscription valid until <b>${fmtDate(t.expires_at)}</b>.\nNew balance: ${money(t.balance)}`);
+    await reply(`✅ Paid <b>${money(paidPrice)}</b>. Subscription valid until <b>${fmtDate(t.expires_at)}</b>.\nNew balance: ${money(t.balance)}`);
     if (t.token) {
       await reply(`Your bot @${escapeHtml(t.bot_username ?? "")} is active again.`);
     } else {
@@ -2446,7 +2672,7 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
     }
     await affiliateNotice(ctx.bot, t.affiliate, `wallet:${ctx.requestId}`);
     for (const adminId of ctx.bot.adminTgIds) {
-      await sendHtml(ctx.bot.token, adminId, `💰 Bot subscription: <b>${escapeHtml(ctx.session.username ?? String(ctx.session.accountId))}</b> paid ${money(price)} (tenant #${t.id}).`).catch(() => {});
+      await sendHtml(ctx.bot.token, adminId, `💰 Bot subscription: <b>${escapeHtml(ctx.session.username ?? String(ctx.session.accountId))}</b> paid ${money(paidPrice)} (tenant #${t.id}).`).catch(() => {});
     }
     return;
   }
@@ -2535,7 +2761,7 @@ async function showOpenPayment(ctx: Ctx, reply: (h: string, e?: any) => any): Pr
   return true;
 }
 
-async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "topup" | "sub", baseAmount: number, net: Network = "bep20") {
+async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, kind: "topup" | "sub", baseAmount: number, net: Network = "bep20", couponId?: number) {
   const accountId = ctx.session.accountId;
   if (!accountId) { ctx.session.step = null; await reply("🔐 Please log in first."); return; }
   if (await showOpenPayment(ctx, reply)) return;
@@ -2545,6 +2771,11 @@ async function startCryptoPayment(ctx: Ctx, reply: (h: string, e?: any) => any, 
   if (!p) {
     if (await showOrderBlock(ctx, reply)) return;
     await reply("⚠️ Could not create the payment. Please try again."); return;
+  }
+  if (couponId) {
+    const db = await getDb();
+    await db.from("crypto_payments").update({ coupon_id: couponId }).eq("id", p.id);
+    ctx.session.coupon = undefined;
   }
   await reply(paymentText(p, wallet, net, paymentMinutesLeft(p.created_at)), paymentKb(p.id, wallet, p.amount));
 }

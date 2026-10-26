@@ -436,3 +436,114 @@ CREATE TABLE IF NOT EXISTS poll_votes (poll_id integer NOT NULL REFERENCES polls
 ALTER TABLE polls ENABLE ROW LEVEL SECURITY;
 ALTER TABLE poll_votes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE polls ADD COLUMN IF NOT EXISTS translations jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+-- ── Coupons / discount codes (per tenant shop; tenant 0 = main bot) ─────────
+CREATE TABLE IF NOT EXISTS coupons (id serial PRIMARY KEY, tenant_id integer NOT NULL DEFAULT 0, code text NOT NULL, kind text NOT NULL DEFAULT 'pct', value double precision NOT NULL, max_uses integer, uses integer NOT NULL DEFAULT 0, expires_at timestamptz, product_id integer, active boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now());
+CREATE UNIQUE INDEX IF NOT EXISTS coupons_tenant_code ON coupons (tenant_id, code);
+CREATE TABLE IF NOT EXISTS coupon_uses (id serial PRIMARY KEY, coupon_id integer NOT NULL REFERENCES coupons(id) ON DELETE CASCADE, account_id integer NOT NULL, amount_off double precision NOT NULL DEFAULT 0, request_id text, created_at timestamptz NOT NULL DEFAULT now(), UNIQUE (coupon_id, account_id));
+GRANT ALL ON coupons, coupon_uses TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE coupons_id_seq, coupon_uses_id_seq TO service_role;
+ALTER TABLE coupons ENABLE ROW LEVEL SECURITY;
+ALTER TABLE coupon_uses ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.crypto_payments ADD COLUMN IF NOT EXISTS coupon_id integer;
+
+-- Validates a coupon for one account and returns the discount (locks the coupon row).
+CREATE OR REPLACE FUNCTION public.coupon_discount(p_tenant integer, p_coupon integer, p_account integer, p_product integer, p_base double precision)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE c coupons; off double precision;
+BEGIN
+ SELECT * INTO c FROM coupons WHERE id = p_coupon AND tenant_id = p_tenant FOR UPDATE;
+ IF NOT FOUND OR NOT c.active THEN RETURN jsonb_build_object('err','invalid'); END IF;
+ IF c.expires_at IS NOT NULL AND c.expires_at < now() THEN RETURN jsonb_build_object('err','expired'); END IF;
+ IF c.max_uses IS NOT NULL AND c.uses >= c.max_uses THEN RETURN jsonb_build_object('err','used_up'); END IF;
+ IF EXISTS (SELECT 1 FROM coupon_uses WHERE coupon_id = c.id AND account_id = p_account) THEN RETURN jsonb_build_object('err','already'); END IF;
+ IF c.product_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM products WHERE id = p_product AND tenant_id = p_tenant AND (id = c.product_id OR parent_id = c.product_id)) THEN
+  RETURN jsonb_build_object('err','product');
+ END IF;
+ off := CASE WHEN c.kind = 'pct' THEN round((p_base * c.value / 100)::numeric, 2)::double precision ELSE c.value END;
+ off := LEAST(GREATEST(off, 0), p_base);
+ RETURN jsonb_build_object('ok', true, 'off', off, 'price', round((p_base - off)::numeric, 2)::double precision, 'code', c.code);
+END; $$;
+
+CREATE OR REPLACE FUNCTION public.record_coupon_use(p_coupon integer, p_account integer, p_off double precision, p_request text)
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+ INSERT INTO coupon_uses (coupon_id, account_id, amount_off, request_id) VALUES (p_coupon, p_account, p_off, p_request) ON CONFLICT DO NOTHING;
+ IF FOUND THEN UPDATE coupons SET uses = uses + 1 WHERE id = p_coupon; END IF;
+END; $$;
+
+-- Subscription paid from balance with a coupon: discount, charge and usage in one transaction.
+CREATE OR REPLACE FUNCTION public.buy_subscription_coupon_once(p_account integer, p_tg bigint, p_price double precision, p_days integer, p_request text, p_coupon integer)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE result jsonb; d jsonb; paid double precision;
+BEGIN
+ PERFORM pg_advisory_xact_lock(hashtextextended('0:' || p_request || ':subscription', 0));
+ SELECT response INTO result FROM bot_operations WHERE tenant_id=0 AND request_id=p_request AND kind='subscription';
+ IF FOUND THEN RETURN result; END IF;
+ d := coupon_discount(0, p_coupon, p_account, NULL, p_price);
+ IF d ? 'err' THEN
+  result := jsonb_build_object('coupon_err', d->>'err');
+ ELSE
+  paid := (d->>'price')::double precision;
+  result := buy_subscription(p_account, p_tg, paid, p_days);
+  IF result->>'ok' = 'true' THEN
+   PERFORM record_coupon_use(p_coupon, p_account, (d->>'off')::double precision, 'wallet:' || p_request);
+   result := result || jsonb_build_object('affiliate', award_subscription_affiliate(p_account, 'wallet:' || p_request), 'paid', paid, 'off', (d->>'off')::double precision);
+  END IF;
+ END IF;
+ INSERT INTO bot_operations VALUES (0,p_request,'subscription',result,now());
+ RETURN result;
+END; $$;
+
+-- Key purchase with a coupon: the discount is credited inside the same transaction
+-- before the charge, and removed again when the purchase does not complete.
+CREATE OR REPLACE FUNCTION public.buy_keys_coupon_once(p_tenant integer, p_account integer, p_product integer, p_qty integer, p_request text, p_coupon integer)
+RETURNS jsonb LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE result jsonb; d jsonb; p record; unit double precision; off double precision := 0;
+BEGIN
+ PERFORM pg_advisory_xact_lock(hashtextextended(p_tenant || ':' || p_request || ':keys', 0));
+ SELECT response INTO result FROM bot_operations WHERE tenant_id=p_tenant AND request_id=p_request AND kind='keys';
+ IF FOUND THEN RETURN result; END IF;
+ SELECT * INTO p FROM products WHERE id = p_product AND tenant_id = p_tenant;
+ IF NOT FOUND THEN result := jsonb_build_object('err', 'Product not found.');
+ ELSE
+  SELECT ap.price INTO unit FROM account_prices ap WHERE ap.account_id = p_account AND ap.product_id = p_product AND ap.tenant_id = p_tenant;
+  unit := COALESCE(unit, p.price);
+  d := coupon_discount(p_tenant, p_coupon, p_account, p_product, unit * p_qty);
+  IF d ? 'err' THEN
+   result := jsonb_build_object('err', 'Coupon is no longer valid.', 'coupon_err', d->>'err');
+  ELSE
+   off := (d->>'off')::double precision;
+   UPDATE bot_accounts SET balance = balance + off WHERE id = p_account AND tenant_id = p_tenant;
+   result := buy_keys(p_tenant, p_account, p_product, p_qty);
+   IF result->>'ok' = 'true' THEN
+    PERFORM record_coupon_use(p_coupon, p_account, off, p_tenant || ':' || p_request);
+    UPDATE shop_orders SET price = price - off / p_qty
+     WHERE id IN (SELECT jsonb_array_elements_text(result->'orders')::integer);
+    result := result || jsonb_build_object('off', off, 'full', (result->>'total')::double precision, 'total', (result->>'total')::double precision - off);
+   ELSE
+    UPDATE bot_accounts SET balance = balance - off WHERE id = p_account AND tenant_id = p_tenant;
+   END IF;
+  END IF;
+ END IF;
+ INSERT INTO bot_operations VALUES (p_tenant,p_request,'keys',result,now());
+ RETURN result;
+END; $$;
+
+-- Crypto subscriptions record their coupon when the payment is fulfilled.
+CREATE OR REPLACE FUNCTION public.record_payment_coupon() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+ IF NEW.status = 'paid' AND OLD.status <> 'paid' AND NEW.coupon_id IS NOT NULL THEN
+  PERFORM record_coupon_use(NEW.coupon_id, NEW.account_id, 0, 'crypto:' || NEW.id);
+ END IF;
+ RETURN NEW;
+END; $$;
+DROP TRIGGER IF EXISTS crypto_payment_coupon ON public.crypto_payments;
+CREATE TRIGGER crypto_payment_coupon AFTER UPDATE OF status ON public.crypto_payments FOR EACH ROW EXECUTE FUNCTION public.record_payment_coupon();
+
+REVOKE EXECUTE ON FUNCTION public.coupon_discount(integer,integer,integer,integer,double precision), public.record_coupon_use(integer,integer,double precision,text),
+ public.buy_subscription_coupon_once(integer,bigint,double precision,integer,text,integer), public.buy_keys_coupon_once(integer,integer,integer,integer,text,integer),
+ public.record_payment_coupon() FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.coupon_discount(integer,integer,integer,integer,double precision),
+ public.buy_subscription_coupon_once(integer,bigint,double precision,integer,text,integer), public.buy_keys_coupon_once(integer,integer,integer,integer,text,integer) TO service_role;
+NOTIFY pgrst, 'reload schema';
