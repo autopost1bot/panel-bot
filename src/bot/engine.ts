@@ -7,7 +7,7 @@
 import { getDb, hashPassword } from "./db";
 import { affiliateNotice, deliver } from "./reliability";
 import {
-  btn, copyBtn, entitiesToHtml, escapeHtml, fmtDate, kb, money, plainLabel,
+  btn, copyBtn, entitiesToHtml, escapeHtml, fmtDate, iconButton, kb, money, plainLabel,
   editHtml, sendHtml, tgCall, urlBtn, webhookSecret, type TgEntity,
 } from "./tg";
 
@@ -1164,10 +1164,11 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
     }
     case "poll_opts": {
       if (!ctx.isBoss || !bot.isMain) return;
-      const opts = parsePollOptions(raw);
+      // Keep premium emoji: options come from the entity-aware HTML, one per line.
+      const opts = parsePollOptions(html);
       if (!opts) { await reply("❌ Send 2–10 options, one per line (max 60 characters each).", kb([btn("✖️ Cancel", "a:poll:0")])); return; }
       ctx.session.step = { s: "poll_ready", q: step.q, opts };
-      await reply(`📊 <b>Poll preview</b>\n\n${step.q}\n\n${opts.map((o, i) => `${i + 1}. ${escapeHtml(o)}`).join("\n")}`,
+      await reply(`📊 <b>Poll preview</b>\n\n${step.q}\n\n${opts.map((o, i) => `${i + 1}. ${o}`).join("\n")}`,
         kb([btn("📤 Send", "a:poll:send")], [btn("✖️ Cancel", "a:poll:0")]));
       return;
     }
@@ -1870,7 +1871,7 @@ function pageSlice<T>(items: T[], requested: number): { items: T[]; page: number
 // ── Polls (main bot): admin asks logged-in users, sees who voted what.
 export function parsePollOptions(raw: string): string[] | null {
   const opts = raw.split(/\r?\n/).map((o) => o.trim()).filter(Boolean);
-  if (opts.length < 2 || opts.length > 10 || opts.some((o) => o.length > 60)) return null;
+  if (opts.length < 2 || opts.length > 10 || opts.some((o) => o.replace(/<[^>]+>/g, "").length > 60)) return null;
   return opts;
 }
 const pollOpts = (p: any): string[] => (Array.isArray(p?.options) ? p.options : JSON.parse(p?.options ?? "[]"));
@@ -1915,7 +1916,7 @@ export async function translatePoll(q: string, opts: string[]): Promise<Record<s
     const tq = await translatePollHtml(q, tl);
     if (tq === null) continue;
     const to: string[] = [];
-    for (const o of opts) { const t = await freeTranslate(o, tl); to.push((t ?? o).slice(0, 60)); }
+    for (const o of opts) to.push((await translatePollHtml(o, tl)) ?? o);
     res[tl] = { q: tq, opts: to };
   }
   return res;
@@ -1943,7 +1944,7 @@ async function pollVote(ctx: Ctx, reply: (h: string, e?: any) => any, id: number
     : await db.from("poll_votes").insert({ poll_id: id, account_id: acc, ...row });
   if (error) { await reply("❌ Could not save your vote. Please try again."); return; }
   const v = pollIn(p, ctx.lang);
-  await reply(`📊 ${v.q}\n\n✅ ${T.vote}: <b>${escapeHtml(v.opts[idx]!)}</b>`, kb(...v.opts.map((o, i) => [btn(`${i === idx ? "✓ " : ""}${o}`, `poll:v:${id}:${i}`)])));
+  await reply(`📊 ${v.q}\n\n✅ ${T.vote}: <b>${v.opts[idx]!}</b>`, kb(...v.opts.map((o, i) => [iconButton(i === idx ? "✓ " + o : o, { callback_data: `poll:v:${id}:${i}` })])));
 }
 
 // ── Coupons (every shop): admin-made discount codes, one use per account.
@@ -2105,7 +2106,7 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     let ok = 0;
     for (const tg of tgs) {
       const v = pollIn(p, langOf(tg));
-      const extra = { reply_markup: { inline_keyboard: v.opts.map((o, i) => [{ text: o, callback_data: `poll:v:${p.id}:${i}` }]) } };
+      const extra = { reply_markup: { inline_keyboard: v.opts.map((o, i) => [iconButton(o, { callback_data: `poll:v:${p.id}:${i}` })]) } };
       if (await sendHtml(ctx.bot.token, tg, `📊 ${v.q}`, extra).catch(() => null)) ok++;
       await new Promise((r) => setTimeout(r, 40));
     }
@@ -2139,7 +2140,7 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     const lines = opts.map((o, i) => {
       const n = votes.filter((v: any) => v.option_idx === i).length;
       const pct = votes.length ? Math.round((n / votes.length) * 100) : 0;
-      return `${i + 1}. ${escapeHtml(o)} — <b>${n}</b> (${pct}%)`;
+      return `${i + 1}. ${o} — <b>${n}</b> (${pct}%)`;
     });
     await reply(`📊 <b>Poll #${p.id}</b> · ${p.status === "open" ? "🟢 Open" : "🔒 Closed"}\n\n${p.question}\n\n${lines.join("\n")}\n\n👥 Total votes: <b>${votes.length}</b>`, kb(
       [btn("👥 Voters", `a:poll:w:${p.id}:0`)],
@@ -2162,7 +2163,7 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     const lines = votes.slice(page * 10, page * 10 + 10).map((v: any) => {
       const a: any = (accs ?? []).find((x: any) => x.id === v.account_id) ?? {};
       const name = a.tg_name || v.tg_name || a.username || "?";
-      return `• ${escapeHtml(name)}${a.tg_username ? ` (@${escapeHtml(a.tg_username)})` : ""} · ${escapeHtml(a.username ?? "?")} → <b>${escapeHtml(opts[v.option_idx] ?? "?")}</b>`;
+      return `• ${escapeHtml(name)}${a.tg_username ? ` (@${escapeHtml(a.tg_username)})` : ""} · ${escapeHtml(a.username ?? "?")} → <b>${opts[v.option_idx] ?? "?"}</b>`;
     });
     await reply(`👥 <b>Voters — Poll #${p.id}</b>${pageLabel(page, pages)}\n\n${lines.join("\n") || "No votes yet."}`, kb(
       ...pageNav(`a:poll:w:${p.id}`, page, pages),
