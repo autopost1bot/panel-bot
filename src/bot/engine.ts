@@ -1814,22 +1814,76 @@ export function parsePollOptions(raw: string): string[] | null {
   return opts;
 }
 const pollOpts = (p: any): string[] => (Array.isArray(p?.options) ? p.options : JSON.parse(p?.options ?? "[]"));
+const POLL_LANGS = ["ar", "ru", "tr", "hi"] as const;
+const POLL_TEXT: Record<string, { vote: string; closed: string; login: string }> = {
+  en: { vote: "Your vote", closed: "This poll is closed.", login: "Please log in to vote." },
+  ar: { vote: "صوتك", closed: "هذا الاستطلاع مغلق.", login: "يرجى تسجيل الدخول للتصويت." },
+  ru: { vote: "Ваш голос", closed: "Этот опрос закрыт.", login: "Войдите, чтобы проголосовать." },
+  tr: { vote: "Oyunuz", closed: "Bu anket kapandı.", login: "Oy vermek için lütfen giriş yapın." },
+  hi: { vote: "आपका वोट", closed: "यह पोल बंद है।", login: "वोट देने के लिए कृपया लॉग इन करें।" },
+};
+const pollText = (lang: string) => POLL_TEXT[lang] ?? POLL_TEXT["en"]!;
+
+/** Free Google Translate endpoint (no key). Returns null on any failure so callers fall back to English. */
+async function freeTranslate(text: string, tl: string): Promise<string | null> {
+  if (!text.trim()) return text;
+  try {
+    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=${tl}&dt=t&q=${encodeURIComponent(text)}`;
+    const r = await fetch(url, { signal: AbortSignal.timeout(8000) });
+    if (!r.ok) return null;
+    const j: any = await r.json();
+    const out = (j?.[0] ?? []).map((x: any) => x?.[0] ?? "").join("");
+    return out ? out : null;
+  } catch { return null; }
+}
+// Translate only text between HTML tags so premium emoji and formatting stay intact.
+async function translatePollHtml(html: string, tl: string): Promise<string | null> {
+  const parts = html.split(/(<tg-emoji\b[^>]*>[\s\S]*?<\/tg-emoji>|<[^>]+>)/);
+  const out: string[] = [];
+  for (const part of parts) {
+    if (!part || part.startsWith("<") || !/[A-Za-z]/.test(part)) { out.push(part); continue; }
+    const lead = part.match(/^\s*/)![0], trail = part.match(/\s*$/)![0];
+    const t = await freeTranslate(part.trim(), tl);
+    if (t === null) return null;
+    out.push(lead + escapeHtml(t) + trail);
+  }
+  return out.join("");
+}
+export async function translatePoll(q: string, opts: string[]): Promise<Record<string, { q: string; opts: string[] }>> {
+  const res: Record<string, { q: string; opts: string[] }> = {};
+  for (const tl of POLL_LANGS) {
+    const tq = await translatePollHtml(q, tl);
+    if (tq === null) continue;
+    const to: string[] = [];
+    for (const o of opts) { const t = await freeTranslate(o, tl); to.push((t ?? o).slice(0, 60)); }
+    res[tl] = { q: tq, opts: to };
+  }
+  return res;
+}
+const pollIn = (p: any, lang: string): { q: string; opts: string[] } => {
+  const tr = typeof p?.translations === "string" ? JSON.parse(p.translations) : p?.translations;
+  const v = tr?.[lang];
+  const base = pollOpts(p);
+  return v && Array.isArray(v.opts) && v.opts.length === base.length ? v : { q: p.question, opts: base };
+};
 
 async function pollVote(ctx: Ctx, reply: (h: string, e?: any) => any, id: number, idx: number) {
   const db = await getDb();
+  const T = pollText(ctx.lang);
   const { data: p } = await db.from("polls").select("*").eq("id", id).eq("tenant_id", ctx.bot.tenantId).maybeSingle();
-  const opts = p ? pollOpts(p) : [];
-  if (!p || !opts[idx]) { await reply("❌ This poll no longer exists."); return; }
-  if (p.status !== "open") { await reply("🔒 This poll is closed."); return; }
+  const base = p ? pollOpts(p) : [];
+  if (!p || !base[idx]) { await reply("❌ This poll no longer exists."); return; }
+  if (p.status !== "open") { await reply(`🔒 ${T.closed}`); return; }
   const acc = ctx.session.accountId;
-  if (!acc) { await reply("🔐 Please log in to vote."); return; }
+  if (!acc) { await reply(`🔐 ${T.login}`); return; }
   const { data: old } = await db.from("poll_votes").select("poll_id").eq("poll_id", id).eq("account_id", acc).maybeSingle();
   const row = { option_idx: idx, tg_id: ctx.tgId, tg_name: ctx.firstName || null, voted_at: new Date().toISOString() };
   const { error } = old
     ? await db.from("poll_votes").update(row).eq("poll_id", id).eq("account_id", acc)
     : await db.from("poll_votes").insert({ poll_id: id, account_id: acc, ...row });
   if (error) { await reply("❌ Could not save your vote. Please try again."); return; }
-  await reply(`${p.question}\n\n✅ Your vote: <b>${escapeHtml(opts[idx]!)}</b>`, kb(...opts.map((o, i) => [btn(`${i === idx ? "✓ " : ""}${o}`, `poll:v:${id}:${i}`)])));
+  const v = pollIn(p, ctx.lang);
+  await reply(`📊 ${v.q}\n\n✅ ${T.vote}: <b>${escapeHtml(v.opts[idx]!)}</b>`, kb(...v.opts.map((o, i) => [btn(`${i === idx ? "✓ " : ""}${o}`, `poll:v:${id}:${i}`)])));
 }
 
 async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
@@ -1841,13 +1895,22 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     const st = ctx.session.step;
     if (st?.s !== "poll_ready") return pollAdmin(ctx, reply, "a:poll:0");
     ctx.session.step = null;
-    const { data: p, error } = await db.from("polls").insert({ tenant_id: T, question: st.q, options: st.opts, status: "open" }).select("*").single();
+    const translations = await translatePoll(st.q, st.opts);
+    const { data: p, error } = await db.from("polls").insert({ tenant_id: T, question: st.q, options: st.opts, translations, status: "open" }).select("*").single();
     if (error || !p) { await reply("❌ Could not create the poll.", kb([btn("⬅️ Go back", "a:poll:0")])); return; }
     const { data: cs } = await db.from("bot_accounts").select("tg_id").eq("tenant_id", T).not("tg_id", "is", null);
-    const extra = { reply_markup: { inline_keyboard: st.opts.map((o, i) => [{ text: o, callback_data: `poll:v:${p.id}:${i}` }]) } };
+    const tgs = (cs ?? []).map((c: any) => Number(c.tg_id));
+    const { data: ss } = tgs.length ? await db.from("bot_sessions").select("tg_id,state").eq("tenant_id", T).in("tg_id", tgs) : { data: [] };
+    const langOf = (tg: number) => { const l = (ss ?? []).find((x: any) => Number(x.tg_id) === tg)?.state?.lang; return isLang(l) ? l : "en"; };
     let ok = 0;
-    for (const c of cs ?? []) { if (await sendHtml(ctx.bot.token, Number(c.tg_id), `📊 ${st.q}`, extra).catch(() => null)) ok++; await new Promise((r) => setTimeout(r, 40)); }
-    await reply(`✅ Poll sent to ${ok}/${(cs ?? []).length} users.`, kb([btn("📊 View results", `a:poll:v:${p.id}`)], [btn("⬅️ Go back", "a:poll:0")]));
+    for (const tg of tgs) {
+      const v = pollIn(p, langOf(tg));
+      const extra = { reply_markup: { inline_keyboard: v.opts.map((o, i) => [{ text: o, callback_data: `poll:v:${p.id}:${i}` }]) } };
+      if (await sendHtml(ctx.bot.token, tg, `📊 ${v.q}`, extra).catch(() => null)) ok++;
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    const langs = Object.keys(translations).length;
+    await reply(`✅ Poll sent to ${ok}/${tgs.length} users.\n🌐 Translated into ${langs}/4 languages${langs < 4 ? " (others get English)" : ""}.`, kb([btn("📊 View results", `a:poll:v:${p.id}`)], [btn("⬅️ Go back", "a:poll:0")]));
     return;
   }
   if ((m = data.match(/^a:poll:(\d+)$/))) {
