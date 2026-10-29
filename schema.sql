@@ -168,6 +168,8 @@ NOTIFY pgrst, 'reload schema';
 -- Affiliates (main bot). Idempotent.
 ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS referred_by integer;
 ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS aff_amount double precision;
+-- Per-user custom subscription price (main bot); NULL = default bot_price.
+ALTER TABLE bot_accounts ADD COLUMN IF NOT EXISTS sub_price double precision;
 CREATE INDEX IF NOT EXISTS bot_accounts_referred_by_idx ON bot_accounts (referred_by);
 CREATE TABLE IF NOT EXISTS affiliate_earnings (id serial PRIMARY KEY, referrer_id integer NOT NULL, buyer_id integer NOT NULL, amount double precision NOT NULL, source text NOT NULL UNIQUE, created_at timestamptz NOT NULL DEFAULT now());
 GRANT ALL ON affiliate_earnings TO service_role;
