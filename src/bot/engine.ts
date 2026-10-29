@@ -744,9 +744,13 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
   const { bot, tgId } = ctx;
   const db = await getDb();
   let raw = text.trim();
-  const pvM = /^\/start\s+pv_(\d+)$/.exec(raw);
+  const pvM = /^\/start\s+pv_(\d+)(?:_(\d+))?$/.exec(raw);
   if (pvM) {
     raw = "/start";
+    if (pvM[2] != null) {
+      const early = await recordStartVote(bot, Number(pvM[1]), Number(pvM[2]), tgId, ctx.firstName, ctx.tgUsername, ctx.lang);
+      if (early) await reply(early);
+    }
     const note = await pollVoteNote(bot, Number(pvM[1]), tgId, ctx.lang);
     if (note) await reply(note);
   }
@@ -2116,6 +2120,21 @@ async function pollVoteNote(bot: BotInfo, id: number, tgId: number, lang: string
   return `📊 ${v.q}\n\n✅ ${pollText(lang).vote}: <b>${v.opts[prev] ?? ""}</b>`;
 }
 
+/** Vote carried by a forwarded link button (Telegram drops tap buttons on forwards). */
+async function recordStartVote(bot: BotInfo, id: number, idx: number, tgId: number, name: string, username: string, lang: string): Promise<string | null> {
+  const db = await getDb();
+  const T = pollText(lang);
+  const { data: p } = await db.from("polls").select("*").eq("id", id).eq("tenant_id", bot.tenantId).maybeSingle();
+  if (!p || p.status === "deleted" || !pollOpts(p)[idx]) return "❌ This poll no longer exists.";
+  if (p.status !== "open") return `🔒 ${T.closed}`;
+  const v = pollIn(p, lang);
+  const prev = await existingVote(id, tgId);
+  if (prev != null) return `📊 ${v.q}\n\n☑️ ${T.vote}: <b>${v.opts[prev] ?? ""}</b>\n\n🔒 ${T.final}`;
+  const { error } = await db.from("poll_tg_votes").insert({ poll_id: id, tg_id: tgId, tg_name: name || null, tg_username: username || null, option_idx: idx, voted_at: new Date().toISOString() });
+  if (error && (await existingVote(id, tgId).catch(() => null)) == null) return "❌ Could not save your vote. Please try again.";
+  return null; // the generic note below confirms the saved vote
+}
+
 export async function publicPollVote(bot: BotInfo, cq: any, from: any, lang: string, started: boolean, id: number, idx: number) {
   const db = await getDb();
   const T = pollText(lang);
@@ -2368,7 +2387,10 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     const p = await load(Number(m[1]));
     if (!p || p.status !== "open") return pollAdmin(ctx, reply, "a:poll:0");
     const v = pollIn(p, "en");
-    await sendHtml(ctx.bot.token, ctx.chatId, themeHtml(`📊 ${v.q}`, ctx.emoji), themeExtra(kb(...v.opts.map((o, i) => [iconButton(o, { callback_data: `poll:v:${p.id}:${i}` })])), ctx.emoji));
+    const user = await botUsername(ctx.bot.token);
+    if (!user) { await reply("❌ Could not read the bot username. Please try again."); return; }
+    // Link buttons survive forwarding; callback buttons are removed by Telegram.
+    await sendHtml(ctx.bot.token, ctx.chatId, themeHtml(`📊 ${v.q}`, ctx.emoji), themeExtra(kb(...v.opts.map((o, i) => [iconButton(o, { url: `https://t.me/${user}?start=pv_${p.id}_${i}` })])), ctx.emoji));
     await sendHtml(ctx.bot.token, ctx.chatId, "☝️ Forward this poll to any channel, group or user. Anyone can vote, even without starting the bot.");
     return;
   }
