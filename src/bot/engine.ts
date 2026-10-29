@@ -762,6 +762,8 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (r) ctx.session.refBy = r.id;
     }
   }
+  // Any other deep-link payload (e.g. t.me/bot?start=ta) opens the normal /start flow.
+  if (/^\/start(?:@\w+)?\s+\S+$/.test(raw)) raw = "/start";
   const html = entitiesToHtml(text, entities).trim();
 
   if (raw === "/cancel") {
