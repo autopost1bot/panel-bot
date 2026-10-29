@@ -78,7 +78,7 @@ type Step =
   | { s: "emoji_icon"; icon: string }
   | { s: "emoji_catalog"; kind: "products" | "categories"; id: number };
 
-type Session = { coupon?: { id: number; code: string; pid: number } | undefined; qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; trialPending?: boolean | undefined; kbShown?: boolean | undefined; kbLang?: string | undefined; lang?: string | undefined; identity?: { accountId: number; name: string; username: string } };
+type Session = { coupon?: { id: number; code: string; pid: number } | undefined; qc?: { brush: string; draft: Record<string, string> } | undefined; refBy?: number | undefined; accountId?: number | undefined; username?: string | undefined; step?: Step | null | undefined; approvalSent?: boolean | undefined; trialPending?: boolean | undefined; kbShown?: boolean | undefined; kbLang?: string | undefined; kbV?: number | undefined; lang?: string | undefined; identity?: { accountId: number; name: string; username: string } };
 
 export type BotInfo = {
   token: string;
@@ -574,8 +574,10 @@ function menuKb(ctx: Ctx) {
   const rows: any[][] = [[{ text: t(L.buy) }], [{ text: t(L.acc) }, { text: t(L.out) }]];
   if (ctx.bot.isMain) rows.push([{ text: t(MY_BOT_LABEL) }]);
   if (ctx.isBoss) rows.push([{ text: t(L.man) }, { text: t(L.stock) }], [{ text: t(L.stats) }]);
-  // Admins type commands from the panels; the Language keyboard button stays customer-only.
-  if (!ctx.isBoss) rows.push([{ text: t(L.lang) }]);
+  // Admins type commands from the panels; the Language keyboard button stays
+  // customer-only in reseller bots. The main bot drops it from the bottom
+  // keyboard entirely — the welcome message still offers the picker.
+  if (!ctx.isBoss && !ctx.bot.isMain) rows.push([{ text: t(L.lang) }]);
   return { reply_markup: { resize_keyboard: true, keyboard: rows } };
 }
 
@@ -697,13 +699,15 @@ async function shopMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
 async function sendMenuKb(ctx: Ctx, text: string) {
   ctx.session.kbShown = true;
   ctx.session.kbLang = ctx.lang;
+  ctx.session.kbV = 2;
   await sendHtml(ctx.bot.token, ctx.chatId, translateHtml(themeHtml(text, ctx.emoji), ctx.lang), translateExtra(themeExtra(menuKb(ctx), ctx.emoji), ctx.lang));
 }
 
 async function startWelcome(ctx: Ctx, reply: (h: string, e?: any) => any) {
   if (ctx.bot.isMain && await showOrderBlock(ctx, reply)) return;
-  // Re-send when missing or still in another language (older keyboards survive updates).
-  if (!ctx.session.kbShown || (ctx.session.kbLang ?? "en") !== ctx.lang) {
+  // Re-send when missing, still in another language, or saved before the
+  // keyboard dropped the Language button (older keyboards survive updates).
+  if (!ctx.session.kbShown || (ctx.session.kbLang ?? "en") !== ctx.lang || ctx.session.kbV !== 2) {
     await sendMenuKb(ctx, "⌨️ Menu");
   }
   return shopMenu(ctx, reply);
