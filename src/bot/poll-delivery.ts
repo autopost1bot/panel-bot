@@ -111,6 +111,8 @@ export async function deletePoll(bot: Bot, pollId: number) {
   if (error) throw error;
   const votes = await db.from("poll_votes").delete().eq("poll_id", pollId);
   if (votes.error) throw votes.error;
+  const tgVotes = await db.from("poll_tg_votes").delete().eq("poll_id", pollId);
+  if (tgVotes.error) throw tgVotes.error;
   await drainPollDeliveries(async () => bot, pollId);
   return pollDeliveryCounts(pollId);
 }

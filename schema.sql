@@ -441,6 +441,10 @@ GRANT ALL ON poll_votes TO service_role;
 ALTER TABLE polls ENABLE ROW LEVEL SECURITY;
 ALTER TABLE poll_votes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE polls ADD COLUMN IF NOT EXISTS translations jsonb NOT NULL DEFAULT '{}'::jsonb;
+-- One final vote per Telegram user; works for people who never started the bot (forwarded polls).
+CREATE TABLE IF NOT EXISTS public.poll_tg_votes (poll_id integer NOT NULL REFERENCES public.polls(id) ON DELETE CASCADE, tg_id bigint NOT NULL, tg_name text, tg_username text, option_idx integer NOT NULL, voted_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (poll_id, tg_id));
+GRANT ALL ON public.poll_tg_votes TO service_role;
+ALTER TABLE public.poll_tg_votes ENABLE ROW LEVEL SECURITY;
 
 -- Private durable poll deliveries. Deleted polls retain a tombstone for cleanup.
 CREATE TABLE IF NOT EXISTS public.poll_deliveries (

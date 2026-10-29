@@ -164,7 +164,8 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   // Tenant gate: subscription must be active (main bot never expires).
   // Fire the callback ack immediately (removes Telegram's loading spinner) and
   // run all independent lookups in parallel to minimise reply latency.
-  const ackP = cq ? tgCall(bot.token, "answerCallbackQuery", { callback_query_id: cq.id }).catch(() => {}) : Promise.resolve();
+  const pollTap = cq ? /^poll:v:(\d+):(\d+)$/.exec(String(cq.data ?? "")) : null;
+  const ackP = cq && !pollTap ? tgCall(bot.token, "answerCallbackQuery", { callback_query_id: cq.id }).catch(() => {}) : Promise.resolve();
   const isBoss0 = bot.isMain ? bot.adminTgIds.includes(tgId) : tgId === bot.ownerTgId;
   const [tRes, sRes, hideRaw, cpRes, emojiRaw, defaultEmojiRaw] = await Promise.all([
     bot.isMain ? Promise.resolve({ data: null as any }) : db.from("tenant_bots").select("*").eq("id", bot.tenantId).maybeSingle(),
@@ -195,6 +196,13 @@ export async function handleUpdate(bot: BotInfo, update: any): Promise<void> {
   // Load session
   const srow = sRes.data as any;
   const session: Session = (srow?.state as Session) ?? {};
+  // Poll taps work anywhere (channels, groups, forwarded copies) and for people
+  // who never started the bot; they never create a session or edit the shared post.
+  if (pollTap) {
+    const lang = isLang(session.lang) ? session.lang : autoLang(from.language_code);
+    await publicPollVote(bot, cq, from, lang, !!srow, Number(pollTap[1]), Number(pollTap[2]));
+    return;
+  }
   let savedState = JSON.stringify(srow?.state ?? {});
   const save = async () => {
     const next = JSON.stringify(session);
@@ -736,6 +744,12 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
   const { bot, tgId } = ctx;
   const db = await getDb();
   let raw = text.trim();
+  const pvM = /^\/start\s+pv_(\d+)$/.exec(raw);
+  if (pvM) {
+    raw = "/start";
+    const note = await pollVoteNote(bot, Number(pvM[1]), tgId, ctx.lang);
+    if (note) await reply(note);
+  }
   const refM = /^\/start\s+(?:ref_(\d+)|([A-Za-z0-9]{5,11}))$/.exec(raw);
   if (refM) {
     raw = "/start";
@@ -1415,7 +1429,6 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (ap) { ctx.session.step = null; return adminProduct(ctx, reply, Number(ap[1])); }
   if (data === "x:cancel") { ctx.session.step = null; return own ? adminMenu(ctx, reply) : ctx.session.accountId ? shopMenu(ctx, reply) : handleText(ctx, reply, "/start", [], save); }
   if (data === "a:home" && own) return adminMenu(ctx, reply);
-  if ((m = data.match(/^poll:v:(\d+):(\d+)$/))) return pollVote(ctx, reply, Number(m[1]), Number(m[2]));
   if (own && bot.isMain && data.startsWith("a:poll")) return pollAdmin(ctx, reply, data);
   if (own && data.startsWith("a:cpn")) return couponAdmin(ctx, reply, data);
   if (own && bot.isMain && data.startsWith("a:bkp")) return backupAdmin(ctx, reply, data);
@@ -2041,31 +2054,92 @@ async function welcomePolls(ctx: Ctx) {
   const { data: polls, error } = await db.from("polls").select("*").eq("tenant_id", ctx.bot.tenantId).eq("status", "open").order("id");
   if (error) throw error;
   for (const p of polls ?? []) {
+    if (await existingVote(p.id, ctx.tgId) != null) continue;
     await queuePollForUser(ctx, p, ctx.chatId, ctx.lang);
     await drainPollDeliveries(async () => ctx.bot, p.id, ctx.chatId);
   }
 }
 
-async function pollVote(ctx: Ctx, reply: (h: string, e?: any) => any, id: number, idx: number) {
+/** Telegram-ID votes plus legacy account votes, one row per voter. */
+async function allPollVotes(pollId: number) {
   const db = await getDb();
-  const T = pollText(ctx.lang);
-  const { data: p } = await db.from("polls").select("*").eq("id", id).eq("tenant_id", ctx.bot.tenantId).maybeSingle();
-  const base = p ? pollOpts(p) : [];
-  if (!p || !base[idx]) { await reply("❌ This poll no longer exists."); return; }
-  if (p.status !== "open") { await reply(`🔒 ${T.closed}`); return; }
-  const acc = ctx.session.accountId;
-  if (!acc) { await reply(`🔐 ${T.login}`); return; }
-  const { data: old } = await db.from("poll_votes").select("option_idx").eq("poll_id", id).eq("account_id", acc).maybeSingle();
-  const v = pollIn(p, ctx.lang);
-  if (old) {
-    const prev = old.option_idx;
-    await reply(`📊 ${v.q}\n\n☑️ ${T.vote}: <b>${v.opts[prev] ?? ""}</b>\n\n🔒 ${T.final}`, kb(...v.opts.map((o, i) => [iconButton(i === prev ? "✓ " + o : o, { callback_data: `poll:v:${id}:${i}` })])));
-    return;
+  const [{ data: tv, error }, { data: av }] = await Promise.all([
+    db.from("poll_tg_votes").select("tg_id,tg_name,tg_username,option_idx,voted_at").eq("poll_id", pollId),
+    db.from("poll_votes").select("account_id,tg_id,tg_name,option_idx").eq("poll_id", pollId),
+  ]);
+  if (error) throw error;
+  const ids = [...new Set((av ?? []).map((v: any) => v.account_id))];
+  const { data: accs } = ids.length ? await db.from("bot_accounts").select("id,username,tg_name,tg_username").in("id", ids) : { data: [] as any[] };
+  const seen = new Set<number>();
+  const out: { option_idx: number; name: string | null; username: string | null; login: string | null }[] = [];
+  for (const v of (av ?? []) as any[]) {
+    const a: any = (accs ?? []).find((x: any) => x.id === v.account_id) ?? {};
+    if (v.tg_id != null) seen.add(Number(v.tg_id));
+    out.push({ option_idx: v.option_idx, name: a.tg_name || v.tg_name || a.username, username: a.tg_username || null, login: a.username || null });
   }
-  const row = { option_idx: idx, tg_id: ctx.tgId, tg_name: ctx.firstName || null, voted_at: new Date().toISOString() };
-  const { error } = await db.from("poll_votes").insert({ poll_id: id, account_id: acc, ...row });
-  if (error) { await reply("❌ Could not save your vote. Please try again."); return; }
-  await reply(`📊 ${v.q}\n\n✅ ${T.vote}: <b>${v.opts[idx]!}</b>`, kb(...v.opts.map((o, i) => [iconButton(i === idx ? "✓ " + o : o, { callback_data: `poll:v:${id}:${i}` })])));
+  for (const v of (tv ?? []) as any[]) {
+    if (seen.has(Number(v.tg_id))) continue;
+    out.push({ option_idx: v.option_idx, name: v.tg_name, username: v.tg_username, login: null });
+  }
+  return out.sort((x, y) => x.option_idx - y.option_idx);
+}
+
+const usernames = new Map<string, string | null>();
+async function botUsername(token: string): Promise<string | null> {
+  if (!usernames.has(token)) {
+    const me: any = await tgCall(token, "getMe").catch(() => null);
+    if (!me?.username) return null;
+    usernames.set(token, me.username);
+  }
+  return usernames.get(token) ?? null;
+}
+
+/** Earliest vote of this Telegram user, from the Telegram-ID ledger or legacy account votes. */
+async function existingVote(pollId: number, tgId: number): Promise<number | null> {
+  const db = await getDb();
+  const { data: tv, error } = await db.from("poll_tg_votes").select("option_idx").eq("poll_id", pollId).eq("tg_id", tgId).maybeSingle();
+  if (error) throw error;
+  if (tv) return Number(tv.option_idx);
+  const { data: av } = await db.from("poll_votes").select("option_idx").eq("poll_id", pollId).eq("tg_id", tgId).limit(1).maybeSingle();
+  return av ? Number(av.option_idx) : null;
+}
+
+const plain = (h: string) => h.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+
+async function pollVoteNote(bot: BotInfo, id: number, tgId: number, lang: string): Promise<string | null> {
+  const db = await getDb();
+  const { data: p } = await db.from("polls").select("*").eq("id", id).eq("tenant_id", bot.tenantId).maybeSingle();
+  if (!p) return null;
+  const prev = await existingVote(id, tgId);
+  if (prev == null) return null;
+  const v = pollIn(p, lang);
+  return `📊 ${v.q}\n\n✅ ${pollText(lang).vote}: <b>${v.opts[prev] ?? ""}</b>`;
+}
+
+export async function publicPollVote(bot: BotInfo, cq: any, from: any, lang: string, started: boolean, id: number, idx: number) {
+  const db = await getDb();
+  const T = pollText(lang);
+  const answer = (text: string, url?: string) => tgCall(bot.token, "answerCallbackQuery", url
+    ? { callback_query_id: cq.id, url }
+    : { callback_query_id: cq.id, text: plain(text).slice(0, 190), show_alert: true }).catch(() => {});
+  const { data: p } = await db.from("polls").select("*").eq("id", id).eq("tenant_id", bot.tenantId).maybeSingle();
+  const base = p && p.status !== "deleted" ? pollOpts(p) : [];
+  if (!p || !base[idx]) return answer("❌ This poll no longer exists.");
+  if (p.status !== "open") return answer(`🔒 ${T.closed}`);
+  const v = pollIn(p, lang);
+  const prev = await existingVote(id, Number(from.id));
+  if (prev != null) return answer(`☑️ ${T.vote}: ${v.opts[prev] ?? ""}\n\n🔒 ${T.final}`);
+  const name = [from.first_name, from.last_name].filter(Boolean).join(" ") || null;
+  const { error } = await db.from("poll_tg_votes").insert({ poll_id: id, tg_id: Number(from.id), tg_name: name, tg_username: from.username ?? null, option_idx: idx, voted_at: new Date().toISOString() });
+  if (error) {
+    const again = await existingVote(id, Number(from.id)).catch(() => null);
+    if (again != null) return answer(`☑️ ${T.vote}: ${v.opts[again] ?? ""}\n\n🔒 ${T.final}`);
+    return answer("❌ Could not save your vote. Please try again.");
+  }
+  // People who never started the bot are sent straight to its Start screen.
+  const user = started ? null : await botUsername(bot.token);
+  if (user) return answer("", `https://t.me/${user}?start=pv_${id}`);
+  return answer(`✅ ${T.vote}: ${v.opts[idx]!}`);
 }
 
 // ── Coupons (every shop): admin-made discount codes, one use per account.
@@ -2259,8 +2333,7 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
       await reply(`🗑 Poll #${p.id} deleted.\n✅ Removed from ${counts.deleted} chats.\n⏳ Pending removal: ${Math.max(0, counts.sent - counts.deleted - counts.deleteFailed)}\n⚠️ Could not remove: ${counts.deleteFailed}\nTelegram may refuse messages older than 48 hours.\nOlder untracked deliveries cannot be removed.`, kb([btn("🔄 Refresh", `a:poll:v:${p.id}`)], [btn("⬅️ Go back", "a:poll:0")]));
       return;
     }
-    const { data: vs } = await db.from("poll_votes").select("option_idx").eq("poll_id", p.id);
-    const votes = vs ?? [];
+    const votes = await allPollVotes(p.id);
     const lines = opts.map((o, i) => {
       const n = votes.filter((v: any) => v.option_idx === i).length;
       const pct = votes.length ? Math.round((n / votes.length) * 100) : 0;
@@ -2269,6 +2342,7 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     await reply(`📊 <b>Poll #${p.id}</b> · ${p.status === "open" ? "🟢 Open" : "🔒 Closed"}\n\n${p.question}\n\n${lines.join("\n")}\n\n👥 Total votes: <b>${votes.length}</b>\n📤 Sent: <b>${counts.sent}</b>\n🚫 Blocked: <b>${counts.blocked}</b>\n❌ Failed: <b>${counts.failed}</b>\n⏳ Pending: <b>${counts.pending}</b>`, kb(
       [btn("🔄 Refresh", `a:poll:v:${p.id}`)],
       [btn("👥 Voters", `a:poll:w:${p.id}:0`)],
+      ...(p.status === "open" ? [[btn("📤 Get poll to forward", `a:poll:f:${p.id}`)]] : []),
       ...(p.status === "open" ? [[btn("🔒 Close poll", `a:poll:c:${p.id}`)]] : []),
       [btn("🗑 Delete", `a:poll:d:${p.id}`)],
       [btn("⬅️ Go back", "a:poll:0")],
@@ -2279,21 +2353,23 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     const p = await load(Number(m[1]));
     if (!p) return pollAdmin(ctx, reply, "a:poll:0");
     const opts = pollOpts(p);
-    const { data: vs } = await db.from("poll_votes").select("account_id,option_idx,tg_name").eq("poll_id", p.id).order("option_idx", { ascending: true });
-    const votes = vs ?? [];
-    const ids = [...new Set(votes.map((v: any) => v.account_id))];
-    const { data: accs } = ids.length ? await db.from("bot_accounts").select("id,username,tg_name,tg_username").in("id", ids) : { data: [] };
+    const votes = await allPollVotes(p.id);
     const pages = Math.max(1, Math.ceil(votes.length / 10));
     const page = Math.max(0, Math.min(Number(m[2]), pages - 1));
-    const lines = votes.slice(page * 10, page * 10 + 10).map((v: any) => {
-      const a: any = (accs ?? []).find((x: any) => x.id === v.account_id) ?? {};
-      const name = a.tg_name || v.tg_name || a.username || "?";
-      return `• ${escapeHtml(name)}${a.tg_username ? ` (@${escapeHtml(a.tg_username)})` : ""} · ${escapeHtml(a.username ?? "?")} → <b>${opts[v.option_idx] ?? "?"}</b>`;
-    });
+    const lines = votes.slice(page * 10, page * 10 + 10).map((v: any) =>
+      `• ${escapeHtml(v.name || "?")}${v.username ? ` (@${escapeHtml(v.username)})` : ""}${v.login ? ` · ${escapeHtml(v.login)}` : ""} → <b>${opts[v.option_idx] ?? "?"}</b>`);
     await reply(`👥 <b>Voters — Poll #${p.id}</b>${pageLabel(page, pages)}\n\n${lines.join("\n") || "No votes yet."}`, kb(
       ...pageNav(`a:poll:w:${p.id}`, page, pages),
       [btn("⬅️ Go back", `a:poll:v:${p.id}`)],
     ));
+    return;
+  }
+  if ((m = data.match(/^a:poll:f:(\d+)$/))) {
+    const p = await load(Number(m[1]));
+    if (!p || p.status !== "open") return pollAdmin(ctx, reply, "a:poll:0");
+    const v = pollIn(p, "en");
+    await sendHtml(ctx.bot.token, ctx.chatId, themeHtml(`📊 ${v.q}`, ctx.emoji), themeExtra(kb(...v.opts.map((o, i) => [iconButton(o, { callback_data: `poll:v:${p.id}:${i}` })])), ctx.emoji));
+    await sendHtml(ctx.bot.token, ctx.chatId, "☝️ Forward this poll to any channel, group or user. Anyone can vote, even without starting the bot.");
     return;
   }
   if ((m = data.match(/^a:poll:c:(\d+)$/))) {
