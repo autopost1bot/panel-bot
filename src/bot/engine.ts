@@ -720,7 +720,6 @@ async function startWelcome(ctx: Ctx, reply: (h: string, e?: any) => any) {
     await sendMenuKb(ctx, "⌨️ Menu");
   }
   await shopMenu(ctx, reply);
-  if (ctx.bot.isMain && !ctx.isBoss && ctx.session.accountId) await welcomePolls(ctx);
 }
 
 async function ask(ctx: Ctx, reply: (h: string, e?: any) => any, step: Step, text: string, extra?: any) {
