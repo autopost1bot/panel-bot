@@ -66,7 +66,7 @@ type Step =
   | { s: "stock_keys"; pid: number } | { s: "stock_review"; pid: number; keys: string[]; request: string }
   | { s: "cat_new"; then: "add" | "list" } | { s: "cat_name"; cid: number }
   | { s: "acc_user" } | { s: "acc_pass"; username: string } | { s: "bal_add" }
-  | { s: "broadcast" } | { s: "welcome" } | { s: "trial_text" } | { s: "support" } | { s: "aff_amount" } | { s: "aff_cu" } | { s: "aff_ca"; acc: number; name: string } | { s: "rm_user" } | { s: "poll_q" } | { s: "poll_opts"; q: string } | { s: "poll_ready"; q: string; opts: string[] }
+  | { s: "broadcast" } | { s: "welcome" } | { s: "trial_text" } | { s: "support" } | { s: "aff_amount" } | { s: "aff_cu" } | { s: "aff_ca"; acc: number; name: string } | { s: "spri_user" } | { s: "spri_amt"; acc: number; name: string } | { s: "rm_user" } | { s: "poll_q" } | { s: "poll_opts"; q: string } | { s: "poll_ready"; q: string; opts: string[] }
   | { s: "topup"; cid: number } | { s: "deduct"; cid: number }
   | { s: "buy_qty"; pid: number } | { s: "cprice"; cid: number; pid: number }
   | { s: "coupon_code"; pid: number }
@@ -424,6 +424,30 @@ async function getPrice(bot: BotInfo): Promise<number> {
   const v = Number((await getSetting(bot, "bot_price")) ?? 30);
   return Number.isFinite(v) && v > 0 ? v : 30;
 }
+/** Per-user custom subscription price (main bot); falls back to the global bot price. */
+async function priceForAccount(bot: BotInfo, accountId: number | undefined): Promise<number> {
+  if (accountId) {
+    const db = await getDb();
+    const { data } = await db.from("bot_accounts").select("sub_price").eq("id", accountId).eq("tenant_id", 0).maybeSingle();
+    const v = Number(data?.sub_price);
+    if (Number.isFinite(v) && v > 0) return v;
+  }
+  return getPrice(bot);
+}
+/** Finds a main-bot account by Telegram ID, account ID, @username or login username. */
+async function findMainAccount(db: any, q: string) {
+  const sel = () => db.from("bot_accounts").select("id,username,tg_name").eq("tenant_id", 0).limit(1);
+  if (/^\d{3,20}$/.test(q)) {
+    const { data: byTg } = await sel().eq("tg_id", Number(q)).maybeSingle();
+    if (byTg) return byTg;
+    const { data: byId } = await sel().eq("id", Number(q)).maybeSingle();
+    return byId ?? null;
+  }
+  const { data: byTgName } = await sel().ilike("tg_username", q).maybeSingle();
+  if (byTgName) return byTgName;
+  const { data: byName } = await sel().ilike("username", q).maybeSingle();
+  return byName ?? null;
+}
 async function getDays(bot: BotInfo): Promise<number> {
   const v = Number((await getSetting(bot, "bot_days")) ?? 30);
   return Number.isFinite(v) && v > 0 ? v : 30;
@@ -556,7 +580,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     [btn("💬 Support username", "a:sup"), btn("👥 Logged-in users", "a:users:0")],
     [btn("✨ Premium emoji", "a:emoji"), btn("🎨 Button colors", "a:colors")],
     ...(ctx.bot.isMain ? [] : [[btn("💲 Custom prices", "a:cpu")]]),
-    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("🎁 Free trial bots", "a:ftb:0"), btn("🎁 Trial text", "a:trt")], [btn("🚫 Remove user", "a:rmu"), btn("📊 Polls", "a:poll:0")], [btn("💾 Backup", "a:bkp")]] : []),
+    ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("💲 Custom sub price", "a:spri:0"), btn("🎁 Free trial bots", "a:ftb:0")], [btn("🎁 Trial text", "a:trt"), btn("🚫 Remove user", "a:rmu")], [btn("📊 Polls", "a:poll:0"), btn("💾 Backup", "a:bkp")]] : []),
     [btn("🏷 Coupons", "a:cpn:0")],
   ));
 }
@@ -857,6 +881,20 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(`✅ Affiliate commission is now <b>${money(v)}</b> per subscription.`);
       return;
     }
+    if (cmd === "setprice") {
+      const v = Number(String(args[0] ?? "").replace(/[$\s]/g, "").replace(",", "."));
+      const q = String(args[1] ?? "").replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
+      if (!args[0] || !q || !Number.isFinite(v) || v < 0 || v > 100000) { await reply("Usage: /setprice 5 @username (or Telegram ID)\nSend /setprice 0 @username to remove the custom price."); return; }
+      const db = await getDb();
+      const a = await findMainAccount(db, q);
+      if (!a) { await reply("❌ User not found (they must have started the bot)."); return; }
+      await db.from("bot_accounts").update({ sub_price: v > 0 ? v : null }).eq("id", a.id).eq("tenant_id", 0);
+      const name = a.tg_name || a.username;
+      await reply(v > 0
+        ? `✅ <b>${escapeHtml(name)}</b> now pays <b>${money(v)}</b> for the bot subscription (default: ${money(await getPrice(bot))}).`
+        : `✅ <b>${escapeHtml(name)}</b> now pays the default price (${money(await getPrice(bot))}).`);
+      return;
+    }
     if (cmd === "affon" || cmd === "affoff") {
       await setSetting(bot, "aff_enabled", cmd === "affon" ? "1" : "0");
       await reply(cmd === "affon" ? "🟢 Affiliate program is ON." : "🔴 Affiliate program is OFF.");
@@ -935,7 +973,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (step.pid) {
         const { data: pr0 } = await db.from("products").select("id, price").eq("tenant_id", bot.tenantId).eq("id", step.pid).maybeSingle();
         base = pr0 ? ctx.prices.get(Number(pr0.id)) ?? Number(pr0.price) : 0;
-      } else base = await getPrice(bot);
+      } else base = await priceForAccount(bot, ctx.session.accountId);
       const q = c ? await couponQuote(ctx, c.id, step.pid || null, base) : { err: "invalid" };
       if (q.err) { await reply("❌ " + couponError(q.err), kb([btn("🔁 Try again", step.pid ? `c:cpn:${step.pid}` : "tsub:cpn")], [btn("⬅️ Go back", back)])); ctx.session.step = null; return; }
       ctx.session.step = null;
@@ -1231,6 +1269,29 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(`✅ Commission set to <b>${money(n)}</b> per subscription.`, kb([btn("⬅️ Go back", "a:aff:0")]));
       return;
     }
+    case "spri_user": {
+      if (!ctx.isBoss || !bot.isMain) return;
+      const q = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
+      const a = await findMainAccount(db, q);
+      if (!a) { await reply("❌ User not found. Send their Telegram ID or @username (they must have started the bot).", kb([btn("✖️ Cancel", "a:spri:0")])); return; }
+      const name = a.tg_name || a.username;
+      return ask(ctx, reply, { s: "spri_amt", acc: a.id, name }, `💲 Send the custom subscription price in $ for <b>${escapeHtml(name)}</b> (e.g. 5).\nSend <b>reset</b> to use the default price again.`, kb([btn("✖️ Cancel", "a:spri:0")]));
+    }
+    case "spri_amt": {
+      if (!ctx.isBoss || !bot.isMain) return;
+      if (/^reset$/i.test(raw)) {
+        await db.from("bot_accounts").update({ sub_price: null }).eq("id", step.acc).eq("tenant_id", 0);
+        ctx.session.step = null;
+        await reply(`✅ <b>${escapeHtml(step.name)}</b> now pays the default price (${money(await getPrice(bot))}).`, kb([btn("⬅️ Go back", "a:spri:0")]));
+        return;
+      }
+      const n = Number(raw.replace(/[$\s]/g, "").replace(",", "."));
+      if (!Number.isFinite(n) || n <= 0 || n > 100000) { await reply("❌ Send a number above 0, e.g. 5 — or reset", kb([btn("✖️ Cancel", "a:spri:0")])); return; }
+      await db.from("bot_accounts").update({ sub_price: n }).eq("id", step.acc).eq("tenant_id", 0);
+      ctx.session.step = null;
+      await reply(`✅ <b>${escapeHtml(step.name)}</b> now pays <b>${money(n)}</b> for the bot subscription.`, kb([btn("⬅️ Go back", "a:spri:0")]));
+      return;
+    }
     case "support": {
       if (!ctx.isBoss) return;
       const u = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
@@ -1266,7 +1327,7 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (ctx.session.trialPending || !prev) {
         if (!ctx.session.trialPending) { ctx.session.step = null; await reply("⛔️ Please start a subscription or free trial first.", kb([btn("⬅️ Back", "tsub:cancel")])); return; }
         const { data: tr } = await db.rpc("claim_trial", { p_account: ctx.session.accountId!, p_tg: tgId, p_days: TRIAL_DAYS });
-        if (!tr?.ok) { ctx.session.step = null; ctx.session.trialPending = undefined; await reply("ℹ️ Your free trial was already used.", kb([btn(`🚀 Make my bot — ${money(await getPrice(bot))}`, "tsub:buy")])); return; }
+        if (!tr?.ok) { ctx.session.step = null; ctx.session.trialPending = undefined; await reply("ℹ️ Your free trial was already used.", kb([btn(`🚀 Make my bot — ${money(await priceForAccount(bot, ctx.session.accountId))}`, "tsub:buy")])); return; }
         trialEnds = fmtDate(tr.expires_at);
       }
       ctx.session.trialPending = undefined;
@@ -1789,6 +1850,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (data === "a:rmu" && own && bot.isMain) return ask(ctx, reply, { s: "rm_user" }, "🚫 <b>Remove user</b>\nSend the user's Telegram ID or @username.\nThey will start fresh on /start (like a brand-new user). Their old balance, orders and bot stay saved but are no longer linked.");
   if (data === "aff:menu" && bot.isMain) return affiliateMenu(ctx, reply);
   if (data.startsWith("a:aff") && own && bot.isMain) return affiliateAdmin(ctx, reply, data);
+  if (data.startsWith("a:spri") && own && bot.isMain) return subPriceAdmin(ctx, reply, data);
   if (data === "c:home") return own ? adminMenu(ctx, reply) : shopMenu(ctx, reply);
   const sm = data.match(/^c:shop:(\d+)$/);
   if (data === "c:shop" || sm) return own ? ownerShop(ctx, reply, sm ? Number(sm[1]) : 0) : shopCustomer(ctx, reply, sm ? Number(sm[1]) : 0);
@@ -2557,7 +2619,7 @@ async function showMyBot(ctx: Ctx, reply: (h: string, e?: any) => any) {
     await reply("🔐 Please log in first, then tap " + MY_BOT_LABEL + " again.\nSend your <b>username</b>:", kb([btn("✖️ Cancel", "x:cancel")]));
     return;
   }
-  const price = await getPrice(ctx.bot);
+  const price = await priceForAccount(ctx.bot, ctx.session.accountId);
   const days = await getDays(ctx.bot);
   const { data: t } = await db.from("tenant_bots").select("*").eq("owner_account_id", ctx.session.accountId).maybeSingle();
   const active = t && t.status === "active" && new Date(t.expires_at) > new Date();
@@ -2580,7 +2642,7 @@ async function showMyBot(ctx: Ctx, reply: (h: string, e?: any) => any) {
 
 async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
   const db = await getDb();
-  const price = await getPrice(ctx.bot);
+  const price = await priceForAccount(ctx.bot, ctx.session.accountId);
   const days = await getDays(ctx.bot);
   if (data === "tsub:no") { await reply("Cancelled."); return; }
   if (data === "tsub:crypto" || data === "tsub:crypto:bep20" || data === "tsub:crypto:trc20") {
@@ -2913,6 +2975,34 @@ async function affiliateMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     `🔗 Your link:\n<code>${escapeHtml(link)}</code>\n\n` +
     `👥 Invited: <b>${invited ?? 0}</b>\n🛒 Sales: <b>${(earn ?? []).length}</b>\n💵 Earned: <b>${money(total)}</b>`,
     kb([urlBtn("📤 Share link", `https://t.me/share/url?url=${encodeURIComponent(link)}`)], [btn("⬅️ Go back", "c:home")]),
+  );
+}
+
+/** Main-admin: per-user custom subscription prices. */
+async function subPriceAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
+  const db = await getDb();
+  if (data === "a:spri:new") return ask(ctx, reply, { s: "spri_user" }, "💲 <b>Custom subscription price</b>\nSend the user's Telegram ID or @username:", kb([btn("✖️ Cancel", "a:spri:0")]));
+  const del = data.match(/^a:spri:del:(\d+)$/);
+  if (del) {
+    await db.from("bot_accounts").update({ sub_price: null }).eq("id", Number(del[1])).eq("tenant_id", 0);
+    await reply("✅ Custom price removed — the user pays the default price again.");
+    data = "a:spri:0";
+  }
+  const page = Math.max(0, Number(data.split(":")[2]) || 0);
+  const { data: rows } = await db.from("bot_accounts").select("id,username,tg_name,sub_price").eq("tenant_id", 0).not("sub_price", "is", null).order("id");
+  const list = rows ?? [];
+  const pages = Math.max(1, Math.ceil(list.length / 10));
+  const p = Math.min(page, pages - 1);
+  const slice = list.slice(p * 10, p * 10 + 10);
+  const lines = slice.map((a: any, i: number) => `${p * 10 + i + 1}. ${escapeHtml(a.tg_name || a.username)} — <b>${money(Number(a.sub_price))}</b>`);
+  const nav: any[] = [];
+  if (p > 0) nav.push(btn("⬅️ Prev", `a:spri:${p - 1}`));
+  if (p < pages - 1) nav.push(btn("Next ➡️", `a:spri:${p + 1}`));
+  await reply(
+    `💲 <b>Custom subscription prices</b>\n\nDefault price: <b>${money(await getPrice(ctx.bot))}</b> / ${await getDays(ctx.bot)} days\n\n` +
+    (lines.length ? `Page ${p + 1}/${pages}\n${lines.join("\n")}` : "No custom prices yet.") +
+    `\n\nOr use: /setprice 5 @username — /setprice 0 @username removes it.`,
+    kb([btn("➕ Set custom price", "a:spri:new")], ...slice.map((a: any) => [btn(`🗑 Remove — ${a.tg_name || a.username}`, `a:spri:del:${a.id}`)]), ...(nav.length ? [nav] : []), [btn("⬅️ Menu", "a:home")]),
   );
 }
 
