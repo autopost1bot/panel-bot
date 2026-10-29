@@ -57,6 +57,7 @@ const PRODUCT_PROMPTS: string[] = ["add_name", "add_vars", "var_price", "var_cos
 
 
 type Step =
+  | { s: "token_limit_user"; disabled: boolean }
   | { s: "login_user" } | { s: "login_pass"; username: string }
   | { s: "add_name"; cat: number | null }
   | { s: "add_vars"; pid: number } | { s: "var_price"; pid: number; label: string } | { s: "var_cost"; pid: number; label: string; price: number }
@@ -521,8 +522,18 @@ async function clearCatalog(db: any, tenantId: number) {
 }
 
 const TOKEN_COOLDOWN_MS = 24 * 3600000;
+async function tokenLimitDisabled(db: any, accountId: number): Promise<boolean> {
+  const { data, error } = await db.from("bot_settings").select("value").eq("tenant_id", 0).eq("key", `token_limit_disabled_${accountId}`).maybeSingle();
+  if (error) throw error;
+  return data?.value === "1";
+}
+async function setTokenLimitDisabled(db: any, accountId: number, disabled: boolean) {
+  const { error } = await db.from("bot_settings").upsert({ tenant_id: 0, key: `token_limit_disabled_${accountId}`, value: disabled ? "1" : "0" }, { onConflict: "tenant_id,key" });
+  if (error) throw error;
+}
 /** Milliseconds until this account may change its bot token again (0 = allowed). */
 export async function tokenCooldown(db: any, accountId: number): Promise<number> {
+  if (await tokenLimitDisabled(db, accountId)) return 0;
   const { data } = await db.from("bot_settings").select("value").eq("tenant_id", 0).eq("key", `token_changed_${accountId}`).maybeSingle();
   const at = Number(data?.value ?? 0);
   return at ? Math.max(0, at + TOKEN_COOLDOWN_MS - Date.now()) : 0;
@@ -582,6 +593,7 @@ async function adminMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
     ...(ctx.bot.isMain ? [] : [[btn("💲 Custom prices", "a:cpu")]]),
     ...(ctx.bot.isMain ? [[btn("🤖 Reseller bots", "a:tb"), btn("💰 Affiliates", "a:aff:0")], [btn("💲 Custom sub price", "a:spri:0"), btn("🎁 Free trial bots", "a:ftb:0")], [btn("🎁 Trial text", "a:trt"), btn("🚫 Remove user", "a:rmu")], [btn("📊 Polls", "a:poll:0"), btn("💾 Backup", "a:bkp")]] : []),
     [btn("🏷 Coupons", "a:cpn:0")],
+    ...(ctx.bot.isMain ? [[btn("🔑 Token change limits", "a:tlimit:0")]] : []),
   ));
 }
 
@@ -893,6 +905,17 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       await reply(v > 0
         ? `✅ <b>${escapeHtml(name)}</b> now pays <b>${money(v)}</b> for the bot subscription (default: ${money(await getPrice(bot))}).`
         : `✅ <b>${escapeHtml(name)}</b> now pays the default price (${money(await getPrice(bot))}).`);
+      return;
+    }
+    if (cmd === "tokenlimit") {
+      const mode = String(args[0] ?? "").toLowerCase();
+      const q = String(args[1] ?? "").replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
+      if (!q || !["off", "on"].includes(mode)) { await reply("Usage: /tokenlimit off @username — remove the 24-hour limit\n/tokenlimit on @username — restore the limit (Telegram ID also works)."); return; }
+      const db = await getDb();
+      const a = await findMainAccount(db, q);
+      if (!a) { await reply("❌ User not found (they must have started the bot)."); return; }
+      await setTokenLimitDisabled(db, a.id, mode === "off");
+      await reply(`✅ <b>${escapeHtml(a.tg_name || a.username)}</b>: token change limit ${mode === "off" ? "removed — no 24-hour wait" : "restored — once every 24 hours"}.`, kb([btn("⬅️ Go back", "a:tlimit:0")]));
       return;
     }
     if (cmd === "affon" || cmd === "affoff") {
@@ -1276,6 +1299,16 @@ async function handleText(ctx: Ctx, reply: (h: string, e?: any) => any, text: st
       if (!a) { await reply("❌ User not found. Send their Telegram ID or @username (they must have started the bot).", kb([btn("✖️ Cancel", "a:spri:0")])); return; }
       const name = a.tg_name || a.username;
       return ask(ctx, reply, { s: "spri_amt", acc: a.id, name }, `💲 Send the custom subscription price in $ for <b>${escapeHtml(name)}</b> (e.g. 5).\nSend <b>reset</b> to use the default price again.`, kb([btn("✖️ Cancel", "a:spri:0")]));
+    }
+    case "token_limit_user": {
+      if (!ctx.isBoss || !bot.isMain) return;
+      const q = raw.replace(/^https?:\/\/t\.me\//i, "").replace(/^@/, "").trim();
+      const a = await findMainAccount(db, q);
+      if (!a) { await reply("❌ User not found. Send their Telegram ID or @username.", kb([btn("✖️ Cancel", "a:tlimit:0")])); return; }
+      await setTokenLimitDisabled(db, a.id, step.disabled);
+      ctx.session.step = null;
+      await reply(`✅ <b>${escapeHtml(a.tg_name || a.username)}</b>: token change limit ${step.disabled ? "removed — no 24-hour wait" : "restored — once every 24 hours"}.`, kb([btn("⬅️ Go back", "a:tlimit:0")]));
+      return;
     }
     case "spri_amt": {
       if (!ctx.isBoss || !bot.isMain) return;
@@ -1851,6 +1884,7 @@ async function handleCallback(ctx: Ctx, reply: (h: string, e?: any) => any, data
   if (data === "aff:menu" && bot.isMain) return affiliateMenu(ctx, reply);
   if (data.startsWith("a:aff") && own && bot.isMain) return affiliateAdmin(ctx, reply, data);
   if (data.startsWith("a:spri") && own && bot.isMain) return subPriceAdmin(ctx, reply, data);
+  if (data.startsWith("a:tlimit") && own && bot.isMain) return tokenLimitAdmin(ctx, reply, data);
   if (data === "c:home") return own ? adminMenu(ctx, reply) : shopMenu(ctx, reply);
   const sm = data.match(/^c:shop:(\d+)$/);
   if (data === "c:shop" || sm) return own ? ownerShop(ctx, reply, sm ? Number(sm[1]) : 0) : shopCustomer(ctx, reply, sm ? Number(sm[1]) : 0);
@@ -2670,7 +2704,8 @@ async function handleSubscription(ctx: Ctx, reply: (h: string, e?: any) => any, 
       return;
     }
     if (cur?.token) {
-      await reply(`⚠️ <b>Change bot token?</b>\n\nIf you continue:\n• All categories, products, durations and keys in your shop will be <b>deleted</b>.\n• Your new bot starts with an empty shop.\n• Your accounts, settings, emoji and colors stay.\n• You can change the token only <b>once every 24 hours</b>.\n\nDo you want to continue?`,
+      const unlimited = await tokenLimitDisabled(db, ctx.session.accountId);
+      await reply(`⚠️ <b>Change bot token?</b>\n\nIf you continue:\n• All categories, products, durations and keys in your shop will be <b>deleted</b>.\n• Your new bot starts with an empty shop.\n• Your accounts, settings, emoji and colors stay.\n${unlimited ? "• Your token change limit is removed — no 24-hour wait." : "• You can change the token only <b>once every 24 hours</b>."}\n\nDo you want to continue?`,
         kb([btn("✅ Continue", "tsub:token_go")], [btn("❌ Cancel", "tsub:cancel")]));
       return;
     }
@@ -2979,6 +3014,22 @@ async function affiliateMenu(ctx: Ctx, reply: (h: string, e?: any) => any) {
 }
 
 /** Main-admin: per-user custom subscription prices. */
+async function tokenLimitAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
+  ctx.session.step = null;
+  if (data === "a:tlimit:off" || data === "a:tlimit:on") return ask(ctx, reply, { s: "token_limit_user", disabled: data.endsWith("off") }, "🔑 Send the user's Telegram ID or @username:", kb([btn("✖️ Cancel", "a:tlimit:0")]));
+  const db = await getDb();
+  const del = data.match(/^a:tlimit:del:(\d+)$/);
+  if (del) { await setTokenLimitDisabled(db, Number(del[1]), false); data = "a:tlimit:0"; }
+  const { data: settings, error } = await db.from("bot_settings").select("key").eq("tenant_id", 0).eq("value", "1");
+  if (error) throw error;
+  const ids = (settings ?? []).map((s: any) => /^token_limit_disabled_(\d+)$/.exec(s.key)?.[1]).filter(Boolean).map(Number);
+  const { data: accounts } = ids.length ? await db.from("bot_accounts").select("id,username,tg_name,tg_username").eq("tenant_id", 0).in("id", ids).order("id") : { data: [] };
+  const { items, page, pages } = pageSlice(accounts ?? [], Number(data.split(":")[2]) || 0);
+  const name = (a: any) => a.tg_username ? `@${a.tg_username}` : a.tg_name || a.username;
+  await reply(`🔑 <b>Token change limits</b>${pageLabel(page, pages)}\n\n` + (items.length ? items.map((a: any, i: number) => `${page * 10 + i + 1}. ${escapeHtml(name(a))} — no 24-hour wait`).join("\n") : "No users with the limit removed."),
+    kb([btn("➕ Remove user's limit", "a:tlimit:off")], [btn("↩️ Restore by username", "a:tlimit:on")], ...items.map((a: any) => [btn(`🗑 Restore — ${name(a)}`, `a:tlimit:del:${a.id}`)]), ...pageNav("a:tlimit", page, pages), [btn("⬅️ Menu", "a:home")]));
+}
+
 async function subPriceAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: string) {
   const db = await getDb();
   if (data === "a:spri:new") return ask(ctx, reply, { s: "spri_user" }, "💲 <b>Custom subscription price</b>\nSend the user's Telegram ID or @username:", kb([btn("✖️ Cancel", "a:spri:0")]));
