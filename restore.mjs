@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 
 const ORDER = ["bot_settings", "bot_accounts", "tenant_bots", "tenant_bot_payments", "categories", "products", "product_keys",
   "account_prices", "shop_orders", "crypto_payments", "bot_payment_transfers", "affiliate_earnings", "trial_claims",
-  "trial_claims_acc", "polls", "poll_votes", "coupons", "coupon_uses", "bot_sessions"];
+  "trial_claims_acc", "polls", "poll_votes", "poll_deliveries", "coupons", "coupon_uses", "bot_sessions"];
 
 const files = process.argv.slice(2);
 if (!files.length) { console.error("Usage: node restore.mjs backup.json.gz [part2 ...]"); process.exit(1); }

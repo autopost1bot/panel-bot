@@ -23,6 +23,7 @@ export const BACKUP_TABLES: [string, string[]][] = [
   ["trial_claims_acc", ["account_id"]],
   ["polls", ["id"]],
   ["poll_votes", ["poll_id", "account_id"]],
+  ["poll_deliveries", ["id"]],
   ["coupons", ["id"]],
   ["coupon_uses", ["id"]],
   ["bot_sessions", ["tenant_id", "tg_id"]],

@@ -16,6 +16,7 @@ import { BUTTON_COLORS, COLOR_BUTTONS, isButtonColor, parseButtonColors } from "
 import { availableNetworks, checkPayment, createPayment, getWallet, openPayment, PAYMENT_TTL_MS, isTronAddress, NETWORK_CHAIN, NETWORK_LABEL, type CryptoPayment, type Network } from "./crypto";
 import { isLang, LANGS, translateExtra, translateHtml, translateLabel } from "./lang";
 import { sendBackup } from "./backup";
+import { queuePoll, drainPollDeliveries, pollDeliveryCounts, deletePoll } from "./poll-delivery";
 
 export const MY_BOT_LABEL = "🤖 My Own Bot";
 export const TRIAL_DAYS = 3;
@@ -710,7 +711,8 @@ async function startWelcome(ctx: Ctx, reply: (h: string, e?: any) => any) {
   if (!ctx.session.kbShown || (ctx.session.kbLang ?? "en") !== ctx.lang || ctx.session.kbV !== 2) {
     await sendMenuKb(ctx, "⌨️ Menu");
   }
-  return shopMenu(ctx, reply);
+  await shopMenu(ctx, reply);
+  if (ctx.bot.isMain && !ctx.isBoss && ctx.session.accountId) await welcomePolls(ctx);
 }
 
 async function ask(ctx: Ctx, reply: (h: string, e?: any) => any, step: Step, text: string, extra?: any) {
@@ -2028,6 +2030,22 @@ const pollIn = (p: any, lang: string): { q: string; opts: string[] } => {
   return v && Array.isArray(v.opts) && v.opts.length === base.length ? v : { q: p.question, opts: base };
 };
 
+async function queuePollForUser(ctx: Ctx, p: any, tg: number, lang: string) {
+  const v = pollIn(p, lang);
+  const extra = translateExtra(themeExtra(kb(...v.opts.map((o, i) => [iconButton(o, { callback_data: `poll:v:${p.id}:${i}` })])), ctx.emoji), lang);
+  await queuePoll(ctx.bot, p, tg, `📊 ${v.q}`, extra);
+}
+
+async function welcomePolls(ctx: Ctx) {
+  const db = await getDb();
+  const { data: polls, error } = await db.from("polls").select("*").eq("tenant_id", ctx.bot.tenantId).eq("status", "open").order("id");
+  if (error) throw error;
+  for (const p of polls ?? []) {
+    await queuePollForUser(ctx, p, ctx.chatId, ctx.lang);
+    await drainPollDeliveries(async () => ctx.bot, p.id, ctx.chatId);
+  }
+}
+
 async function pollVote(ctx: Ctx, reply: (h: string, e?: any) => any, id: number, idx: number) {
   const db = await getDb();
   const T = pollText(ctx.lang);
@@ -2203,23 +2221,21 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     const { data: p, error } = await db.from("polls").insert({ tenant_id: T, question: st.q, options: st.opts, translations, status: "open" }).select("*").single();
     if (error || !p) { await reply("❌ Could not create the poll.", kb([btn("⬅️ Go back", "a:poll:0")])); return; }
     const { data: cs } = await db.from("bot_accounts").select("tg_id").eq("tenant_id", T).not("tg_id", "is", null);
-    const tgs = (cs ?? []).map((c: any) => Number(c.tg_id));
+    const tgs = [...new Set<number>((cs ?? []).map((c: any) => Number(c.tg_id)).filter((tg: number) => Number.isSafeInteger(tg) && tg > 0))];
     const { data: ss } = tgs.length ? await db.from("bot_sessions").select("tg_id,state").eq("tenant_id", T).in("tg_id", tgs) : { data: [] };
     const langOf = (tg: number) => { const l = (ss ?? []).find((x: any) => Number(x.tg_id) === tg)?.state?.lang; return isLang(l) ? l : "en"; };
-    let ok = 0;
     for (const tg of tgs) {
-      const v = pollIn(p, langOf(tg));
-      const extra = { reply_markup: { inline_keyboard: v.opts.map((o, i) => [iconButton(o, { callback_data: `poll:v:${p.id}:${i}` })]) } };
-      if (await sendHtml(ctx.bot.token, tg, `📊 ${v.q}`, extra).catch(() => null)) ok++;
-      await new Promise((r) => setTimeout(r, 40));
+      await queuePollForUser(ctx, p, tg, langOf(tg));
     }
+    await drainPollDeliveries(async () => ctx.bot, p.id);
+    const counts = await pollDeliveryCounts(p.id);
     const langs = Object.keys(translations).length;
-    await reply(`✅ Poll sent to ${ok}/${tgs.length} users.\n🌐 Translated into ${langs}/4 languages${langs < 4 ? " (others get English)" : ""}.`, kb([btn("📊 View results", `a:poll:v:${p.id}`)], [btn("⬅️ Go back", "a:poll:0")]));
+    await reply(`✅ Poll sent to ${counts.sent}/${tgs.length} users.\n🚫 Blocked: ${counts.blocked} · Failed: ${counts.failed} · Pending: ${counts.pending}\n🌐 Translated into ${langs}/4 languages${langs < 4 ? " (others get English)" : ""}.`, kb([btn("📊 View results", `a:poll:v:${p.id}`)], [btn("⬅️ Go back", "a:poll:0")]));
     return;
   }
   if ((m = data.match(/^a:poll:(\d+)$/))) {
     if (ctx.session.step?.s.startsWith("poll")) ctx.session.step = null;
-    const { data: ps } = await db.from("polls").select("id,question,status").eq("tenant_id", T).order("id", { ascending: false });
+    const { data: ps } = await db.from("polls").select("id,question,status").eq("tenant_id", T).not("status", "eq", "deleted").order("id", { ascending: false });
     const all = ps ?? [];
     const pages = Math.max(1, Math.ceil(all.length / 10));
     const page = Math.max(0, Math.min(Number(m[1]), pages - 1));
@@ -2238,6 +2254,11 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     const p = await load(Number(m[1]));
     if (!p) return pollAdmin(ctx, reply, "a:poll:0");
     const opts = pollOpts(p);
+    const counts = await pollDeliveryCounts(p.id);
+    if (p.status === "deleted") {
+      await reply(`🗑 Poll #${p.id} deleted.\n✅ Removed from ${counts.deleted} chats.\n⏳ Pending removal: ${Math.max(0, counts.sent - counts.deleted - counts.deleteFailed)}\n⚠️ Could not remove: ${counts.deleteFailed}\nTelegram may refuse messages older than 48 hours.\nOlder untracked deliveries cannot be removed.`, kb([btn("🔄 Refresh", `a:poll:v:${p.id}`)], [btn("⬅️ Go back", "a:poll:0")]));
+      return;
+    }
     const { data: vs } = await db.from("poll_votes").select("option_idx").eq("poll_id", p.id);
     const votes = vs ?? [];
     const lines = opts.map((o, i) => {
@@ -2245,7 +2266,8 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
       const pct = votes.length ? Math.round((n / votes.length) * 100) : 0;
       return `${i + 1}. ${o} — <b>${n}</b> (${pct}%)`;
     });
-    await reply(`📊 <b>Poll #${p.id}</b> · ${p.status === "open" ? "🟢 Open" : "🔒 Closed"}\n\n${p.question}\n\n${lines.join("\n")}\n\n👥 Total votes: <b>${votes.length}</b>`, kb(
+    await reply(`📊 <b>Poll #${p.id}</b> · ${p.status === "open" ? "🟢 Open" : "🔒 Closed"}\n\n${p.question}\n\n${lines.join("\n")}\n\n👥 Total votes: <b>${votes.length}</b>\n📤 Sent: <b>${counts.sent}</b>\n🚫 Blocked: <b>${counts.blocked}</b>\n❌ Failed: <b>${counts.failed}</b>\n⏳ Pending: <b>${counts.pending}</b>`, kb(
+      [btn("🔄 Refresh", `a:poll:v:${p.id}`)],
       [btn("👥 Voters", `a:poll:w:${p.id}:0`)],
       ...(p.status === "open" ? [[btn("🔒 Close poll", `a:poll:c:${p.id}`)]] : []),
       [btn("🗑 Delete", `a:poll:d:${p.id}`)],
@@ -2279,9 +2301,10 @@ async function pollAdmin(ctx: Ctx, reply: (h: string, e?: any) => any, data: str
     return pollAdmin(ctx, reply, `a:poll:v:${m[1]}`);
   }
   if ((m = data.match(/^a:poll:d:(\d+)$/))) {
-    await db.from("poll_votes").delete().eq("poll_id", Number(m[1]));
-    await db.from("polls").delete().eq("id", Number(m[1])).eq("tenant_id", T);
-    return pollAdmin(ctx, reply, "a:poll:0");
+    const p = await load(Number(m[1]));
+    if (!p) return pollAdmin(ctx, reply, "a:poll:0");
+    await deletePoll(ctx.bot, p.id);
+    return pollAdmin(ctx, reply, `a:poll:v:${p.id}`);
   }
 }
 

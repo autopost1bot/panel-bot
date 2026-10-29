@@ -4,6 +4,7 @@ import { setDefaultResultOrder } from "node:dns";
 setDefaultResultOrder("ipv4first");
 import { getDb } from "./bot/db";
 import { enqueueUpdate, drainUpdates, drainOutbox } from "./bot/reliability";
+import { drainPollDeliveries } from "./bot/poll-delivery";
 import { sendHtml, tgCall, webhookSecret } from "./bot/tg";
 import { scanPayments } from "./bot/crypto";
 import { backupDue, sendBackup } from "./bot/backup";
@@ -177,6 +178,9 @@ server.listen(PORT, async () => {
   void recover();
   setInterval(recover, 1000);
   setInterval(deliverPending, 30_000);
+  const deliverPolls = () => drainPollDeliveries(resolveBot).catch(() => console.error("Poll delivery recovery failed"));
+  void deliverPolls();
+  setInterval(deliverPolls, 2000);
   void expiryCheck();
   setInterval(expiryCheck, 60 * 60 * 1000);
   void dailyBackup();

@@ -434,10 +434,59 @@ $function$;
 
 -- Polls (main bot): admin questions for logged-in users and their votes (one per account).
 CREATE TABLE IF NOT EXISTS polls (id serial PRIMARY KEY, tenant_id integer NOT NULL DEFAULT 0, question text NOT NULL, options jsonb NOT NULL DEFAULT '[]'::jsonb, status text NOT NULL DEFAULT 'open', created_at timestamptz NOT NULL DEFAULT now());
+GRANT ALL ON polls TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE polls_id_seq TO service_role;
 CREATE TABLE IF NOT EXISTS poll_votes (poll_id integer NOT NULL REFERENCES polls(id) ON DELETE CASCADE, account_id integer NOT NULL REFERENCES bot_accounts(id) ON DELETE CASCADE, tg_id bigint, tg_name text, option_idx integer NOT NULL, voted_at timestamptz NOT NULL DEFAULT now(), PRIMARY KEY (poll_id, account_id));
+GRANT ALL ON poll_votes TO service_role;
 ALTER TABLE polls ENABLE ROW LEVEL SECURITY;
 ALTER TABLE poll_votes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE polls ADD COLUMN IF NOT EXISTS translations jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+-- Private durable poll deliveries. Deleted polls retain a tombstone for cleanup.
+CREATE TABLE IF NOT EXISTS public.poll_deliveries (
+ id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ poll_id integer NOT NULL REFERENCES public.polls(id) ON DELETE CASCADE,
+ tenant_id integer NOT NULL, chat_id bigint NOT NULL,
+ html text NOT NULL, extra jsonb NOT NULL DEFAULT '{}'::jsonb,
+ status text NOT NULL DEFAULT 'pending', message_id bigint, sent_at timestamptz,
+ attempts integer NOT NULL DEFAULT 0, lease_until timestamptz,
+ next_attempt_at timestamptz NOT NULL DEFAULT now(), last_error text,
+ delete_status text NOT NULL DEFAULT 'none', delete_attempts integer NOT NULL DEFAULT 0,
+ created_at timestamptz NOT NULL DEFAULT now(), UNIQUE(poll_id,chat_id)
+);
+GRANT ALL ON public.poll_deliveries TO service_role;
+GRANT USAGE, SELECT ON SEQUENCE public.poll_deliveries_id_seq TO service_role;
+ALTER TABLE public.poll_deliveries ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS poll_deliveries_queue_idx ON public.poll_deliveries(next_attempt_at,id);
+
+CREATE OR REPLACE FUNCTION public.claim_poll_delivery(p_poll integer DEFAULT NULL, p_chat bigint DEFAULT NULL)
+RETURNS public.poll_deliveries LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE picked bigint; result poll_deliveries;
+BEGIN
+ -- No automatic retry after an ambiguous send/crash: Telegram has no send idempotency key.
+ UPDATE poll_deliveries SET status='failed',lease_until=NULL,last_error='Delivery outcome unknown; not resent to avoid duplicates'
+ WHERE status='sending' AND lease_until < now();
+ UPDATE poll_deliveries d SET status='cancelled',lease_until=NULL
+ FROM polls p WHERE d.poll_id=p.id AND p.status <> 'open' AND d.status IN ('pending','retry');
+ SELECT d.id INTO picked FROM poll_deliveries d JOIN polls p ON p.id=d.poll_id AND p.tenant_id=d.tenant_id
+ WHERE (p_poll IS NULL OR d.poll_id=p_poll) AND (p_chat IS NULL OR d.chat_id=p_chat)
+ AND ((p.status='open' AND d.status IN ('pending','retry') AND d.next_attempt_at <= now())
+ OR (p.status='deleted' AND d.message_id IS NOT NULL AND (d.delete_status='none'
+ OR (d.delete_status='pending' AND d.next_attempt_at <= now())
+ OR (d.delete_status='deleting' AND d.lease_until < now()))))
+ ORDER BY CASE WHEN p.status='deleted' THEN 0 ELSE 1 END,d.id
+ LIMIT 1 FOR UPDATE OF d SKIP LOCKED;
+ IF picked IS NULL THEN RETURN NULL; END IF;
+ UPDATE poll_deliveries d SET lease_until=now()+interval '2 minutes',
+ status=CASE WHEN p.status='open' THEN 'sending' ELSE d.status END,
+ attempts=d.attempts+CASE WHEN p.status='open' THEN 1 ELSE 0 END,
+ delete_status=CASE WHEN p.status='deleted' THEN 'deleting' ELSE d.delete_status END,
+ delete_attempts=d.delete_attempts+CASE WHEN p.status='deleted' THEN 1 ELSE 0 END
+ FROM polls p WHERE d.id=picked AND p.id=d.poll_id RETURNING d.* INTO result;
+ RETURN result;
+END; $$;
+REVOKE EXECUTE ON FUNCTION public.claim_poll_delivery(integer,bigint) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION public.claim_poll_delivery(integer,bigint) TO service_role;
 
 -- ── Coupons / discount codes (per tenant shop; tenant 0 = main bot) ─────────
 CREATE TABLE IF NOT EXISTS coupons (id serial PRIMARY KEY, tenant_id integer NOT NULL DEFAULT 0, code text NOT NULL, kind text NOT NULL DEFAULT 'pct', value double precision NOT NULL, max_uses integer, uses integer NOT NULL DEFAULT 0, expires_at timestamptz, product_id integer, active boolean NOT NULL DEFAULT true, created_at timestamptz NOT NULL DEFAULT now());
